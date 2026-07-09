@@ -52,6 +52,7 @@ type Response struct {
 	Content          string
 	ReasoningContent string
 	ToolCalls        []ToolCall
+	Usage            *Usage
 }
 
 type ChunkType int
@@ -90,6 +91,10 @@ type Config struct {
 	BaseURL string
 	Model   string
 }
+
+type contextKey string
+
+const CtxLogf contextKey = "protocol_logf"
 
 type Factory func(Config) (Protocol, error)
 

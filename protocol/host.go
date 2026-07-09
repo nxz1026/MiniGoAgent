@@ -56,6 +56,25 @@ func IsOllamaCloud(baseURL string) bool {
 	return matchesVendorHost(baseURL, "ollama.com", "ollama.com")
 }
 
+func (v Vendor) String() string {
+	switch v {
+	case VendorDeepSeek:
+		return "deepseek"
+	case VendorMiniMax:
+		return "minimax"
+	case VendorMiMo:
+		return "mimo"
+	case VendorZhipu:
+		return "zhipu"
+	case VendorLongCat:
+		return "longcat"
+	case VendorOllamaCloud:
+		return "ollama"
+	default:
+		return "openai"
+	}
+}
+
 func DetectVendor(baseURL string) Vendor {
 	switch {
 	case IsDeepSeek(baseURL):

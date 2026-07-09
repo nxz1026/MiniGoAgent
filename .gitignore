@@ -2,3 +2,8 @@
 .env
 $null
 history.json
+MEMO.md
+logs/
+reference/headroom/
+reference/rtk/
+reference/DeepSeek-Reasonix/

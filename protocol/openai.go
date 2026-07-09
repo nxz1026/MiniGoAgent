@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -36,17 +38,24 @@ type OpenAI struct {
 	effort       string
 	thinkingType string
 	policy       reasoningPolicy
+	Logf         func(format string, args ...any)
+	Telemetry    *Telemetry
+	muUsage      sync.Mutex
+	lastUsage    *Usage
 }
+
+func (o *OpenAI) GetTelemetry() *Telemetry { return o.Telemetry }
 
 func NewOpenAI(apiKey, baseURL, model string) *OpenAI {
 	baseURL = strings.TrimRight(baseURL, "/")
 	o := &OpenAI{
-		apiKey:  apiKey,
-		baseURL: baseURL + "/chat/completions",
-		model:   model,
-		client:  &http.Client{Timeout: 120 * time.Second},
-		name:    model,
-		vendor:  DetectVendor(baseURL),
+		apiKey:    apiKey,
+		baseURL:   baseURL + "/chat/completions",
+		model:     model,
+		client:    &http.Client{Timeout: 120 * time.Second},
+		name:      model,
+		vendor:    DetectVendor(baseURL),
+		Telemetry: NewTelemetry(),
 	}
 	switch o.vendor {
 	case VendorDeepSeek:
@@ -60,23 +69,39 @@ func NewOpenAI(apiKey, baseURL, model string) *OpenAI {
 }
 
 func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
+	start := time.Now()
 	ch, err := o.Stream(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	var resp Response
+	chunkCount := 0
 	for chunk := range ch {
+		chunkCount++
 		switch chunk.Type {
 		case ChunkText:
 			resp.Content += chunk.Text
+			if len(resp.Content) < 2048 || chunkCount%50 == 0 {
+				o.logf(ctx, "RAW stream chunk[%d] text len=%d total=%d", chunkCount, len(chunk.Text), len(resp.Content))
+			}
 		case ChunkReasoning:
 			resp.ReasoningContent += chunk.Text
+			o.logf(ctx, "RAW stream chunk[%d] reasoning len=%d", chunkCount, len(chunk.Text))
 		case ChunkToolCall:
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
+			o.logf(ctx, "RAW stream chunk[%d] tool_call id=%s name=%s", chunkCount, chunk.ToolCall.ID, chunk.ToolCall.Name)
+		case ChunkUsage:
+			resp.Usage = chunk.Usage
+			o.logf(ctx, "RAW stream usage prompt=%d completion=%d total=%d",
+				chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens)
 		case ChunkError:
+			o.logf(ctx, "RAW stream error: %s", chunk.Error)
 			return nil, fmt.Errorf("%s", chunk.Error)
 		}
 	}
+	o.logf(ctx, "RAW chat done content=%dKB tool_calls=%d usage=%+v",
+		len(resp.Content)/1024, len(resp.ToolCalls), resp.Usage)
+	o.Telemetry.Record(o.model, o.vendor.String(), time.Since(start).Seconds(), resp.Usage)
 	return &resp, nil
 }
 
@@ -91,13 +116,16 @@ func (o *OpenAI) Stream(ctx context.Context, req Request) (<-chan Chunk, error) 
 func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<- Chunk) {
 	var emitted bool
 	var lastErr error
+	start := time.Now()
 	for attempt := 0; attempt <= maxReconnectAttempts; attempt++ {
 		if attempt > 0 {
 			if emitted {
+				o.logf(ctx, "RAW reconnect attempt=%d skipped (already emitted)", attempt)
 				sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr.Error()})
 				return
 			}
 			delay := backoffDelay(attempt, 0)
+			o.logf(ctx, "RAW reconnect attempt=%d delay=%v err=%v", attempt, delay, lastErr)
 			select {
 			case <-ctx.Done():
 				return
@@ -108,11 +136,14 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 			return o.buildHTTPRequest(ctx, req)
 		})
 		if err != nil {
+			o.logf(ctx, "RAW SendWithRetry attempt=%d err=%v", attempt, err)
 			lastErr = err
 			continue
 		}
+		o.logf(ctx, "RAW HTTP response status=%d", resp.StatusCode)
 		emitted, err = o.readStream(ctx, resp, out)
 		if err != nil {
+			o.logf(ctx, "RAW readStream attempt=%d err=%v emitted=%v", attempt, err, emitted)
 			lastErr = err
 			if emitted || !IsConnReset(err) {
 				if !emitted {
@@ -122,15 +153,38 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 			}
 			continue
 		}
+		o.recordStreamCall(start, nil)
 		return
 	}
+	o.logf(ctx, "RAW all reconnect attempts exhausted last_err=%v", lastErr)
 	sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr.Error()})
+	o.recordStreamCall(start, lastErr)
+}
+
+func (o *OpenAI) recordStreamCall(start time.Time, err error) {
+	o.muUsage.Lock()
+	usage := o.lastUsage
+	o.lastUsage = nil
+	o.muUsage.Unlock()
+	if err != nil {
+		return
+	}
+	o.Telemetry.Record(o.model, o.vendor.String(), time.Since(start).Seconds(), usage)
 }
 
 func sendChunk(ctx context.Context, out chan<- Chunk, ch Chunk) {
 	select {
 	case out <- ch:
 	case <-ctx.Done():
+	}
+}
+
+func (o *OpenAI) logf(ctx context.Context, format string, args ...any) {
+	if o.Logf != nil {
+		o.Logf(format, args...)
+	}
+	if fn, ok := ctx.Value(CtxLogf).(func(string, ...any)); ok && fn != nil {
+		fn(format, args...)
 	}
 }
 
@@ -142,6 +196,8 @@ func (o *OpenAI) buildHTTPRequest(ctx context.Context, req Request) (*http.Reque
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+	o.logf(ctx, "RAW POST %s body=%dKB msgs=%d tools=%d model=%s",
+		o.baseURL, len(body)/1024, len(req.Messages), len(req.Tools), o.model)
 	return httpReq, nil
 }
 
@@ -172,9 +228,15 @@ func (o *OpenAI) buildBody(req Request) []byte {
 }
 
 func (o *OpenAI) toWireMessages(msgs []Message) []map[string]any {
+	liveIdx := findLiveZoneStart(msgs)
 	out := make([]map[string]any, 0, len(msgs))
-	for _, m := range msgs {
-		item := map[string]any{"role": string(m.Role), "content": m.Content}
+	for i, m := range msgs {
+		content := m.Content
+		if i >= liveIdx && (m.Role == RoleTool || m.Role == RoleUser) && len(content) > 512 {
+			ct := DetectContentType(content)
+			content = CompressContent(content, ct)
+		}
+		item := map[string]any{"role": string(m.Role), "content": content}
 		if len(m.ToolCalls) > 0 {
 			tcs := make([]map[string]any, len(m.ToolCalls))
 			for i, tc := range m.ToolCalls {
@@ -200,9 +262,13 @@ func (o *OpenAI) toWireMessages(msgs []Message) []map[string]any {
 }
 
 func (o *OpenAI) toWireTools(tools []ToolSchema) []map[string]any {
-	out := make([]map[string]any, len(tools))
-	for i, t := range tools {
-		params := CanonicalizeSchema(t.Parameters)
+	sorted := append([]ToolSchema{}, tools...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Name < sorted[j].Name
+	})
+	out := make([]map[string]any, len(sorted))
+	for i, t := range sorted {
+		params := sortSchemaKeys(CanonicalizeSchema(t.Parameters))
 		out[i] = map[string]any{
 			"type": "function",
 			"function": map[string]any{
@@ -211,6 +277,61 @@ func (o *OpenAI) toWireTools(tools []ToolSchema) []map[string]any {
 		}
 	}
 	return out
+}
+
+func sortSchemaKeys(raw json.RawMessage) json.RawMessage {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return raw
+	}
+	return json.RawMessage(sortKeysRecursive(v))
+}
+
+func sortKeysRecursive(v any) string {
+	switch val := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var b bytes.Buffer
+		b.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			keyJSON, _ := json.Marshal(k)
+			b.Write(keyJSON)
+			b.WriteByte(':')
+			b.WriteString(sortKeysRecursive(val[k]))
+		}
+		b.WriteByte('}')
+		return b.String()
+	case []any:
+		var b bytes.Buffer
+		b.WriteByte('[')
+		for i, elem := range val {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(sortKeysRecursive(elem))
+		}
+		b.WriteByte(']')
+		return b.String()
+	default:
+		data, _ := json.Marshal(val)
+		return string(data)
+	}
+}
+
+func findLiveZoneStart(msgs []Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == RoleUser {
+			return i
+		}
+	}
+	return 0
 }
 
 func (o *OpenAI) buildThinkingFields(m map[string]any) {
@@ -250,6 +371,11 @@ func (o *OpenAI) buildThinkingFields(m map[string]any) {
 	}
 }
 
+// readStream uses bufio.Scanner (not SseFramer) because MiniGoAgent is an
+// HTTP client: net/http handles chunked transfer transparently and Scanner's
+// 64 KB internal buffer guarantees no line-level truncation. SseFramer in
+// sse_framer.go is available for raw-TCP proxy scenarios but is not needed
+// here — see that file for details and wiring instructions.
 func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<- Chunk) (emitted bool, _ error) {
 	defer resp.Body.Close()
 	defer close(out)
@@ -258,6 +384,7 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 	done := make(chan struct{})
 	defer close(done)
 	activity := make(chan struct{}, 1)
+	o.logf(ctx, "RAW readStream stall watchdog started timeout=%v", idleTimeout)
 	var stalled atomic.Bool
 	go func() {
 		idle := time.NewTimer(idleTimeout)
@@ -352,11 +479,15 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 			return emitted, fmt.Errorf("API stream error: %s", sr.Error.Message)
 		}
 		if sr.Usage != nil {
-			send(Chunk{Type: ChunkUsage, Usage: &Usage{
+			u := &Usage{
 				PromptTokens:     sr.Usage.PromptTokens,
 				CompletionTokens: sr.Usage.CompletionTokens,
 				TotalTokens:      sr.Usage.TotalTokens,
-			}})
+			}
+			o.muUsage.Lock()
+			o.lastUsage = u
+			o.muUsage.Unlock()
+			send(Chunk{Type: ChunkUsage, Usage: u})
 		}
 		if len(sr.Choices) == 0 {
 			continue
@@ -442,8 +573,10 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 		return emitted, fmt.Errorf("scanner error: %w", err)
 	}
 	if stalled.Load() {
+		o.logf(ctx, "RAW stream idle timeout after %v", idleTimeout)
 		send(Chunk{Type: ChunkError, Error: "stream idle timeout"})
 		return emitted, fmt.Errorf("stream idle timeout")
 	}
+	o.logf(ctx, "RAW stream EOF emitted=%v", emitted)
 	return emitted, nil
 }

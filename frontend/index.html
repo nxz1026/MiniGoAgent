@@ -23,6 +23,7 @@ body{font-family:-apple-system,sans-serif;background:#f0f0f5;height:100vh;displa
 #send-btn:disabled{opacity:.5;cursor:default}
 #paste-hint{font-size:11px;color:#999;padding:2px 16px 6px;background:#fff;flex-shrink:0}
 .loading{color:#999;font-style:italic}
+.stats{font-size:11px;color:#888;padding:4px 0 0;border-top:1px solid #eee;margin-top:6px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 </style>
 </head>
 <body>
@@ -107,7 +108,20 @@ async function send() {
       })
       const data = await res.json()
       loading.remove()
-      addHTML(marked(data.reply), 'agent')
+      const bubble = document.createElement('div')
+      bubble.className = 'msg agent'
+      bubble.innerHTML = marked(data.reply)
+      if (data.stats) {
+        const s = data.stats
+        const statsDiv = document.createElement('div')
+        statsDiv.className = 'stats'
+        statsDiv.innerHTML = '<span>' + s.duration + '</span><span>' + s.model + '</span>'
+        if (s.in_tokens_h) statsDiv.innerHTML += '<span>\u2191' + s.in_tokens_h + '</span>'
+        if (s.out_tokens_h) statsDiv.innerHTML += '<span>\u2193' + s.out_tokens_h + '</span>'
+        if (s.ctx_max_h) statsDiv.innerHTML += '<span>ctx ' + s.in_tokens_h + '/' + s.ctx_max_h + ' ' + s.ctx_pct + '</span>'
+        bubble.appendChild(statsDiv)
+      }
+      document.getElementById('messages').appendChild(bubble)
     } catch (e) {
       loading.remove()
       addMsg('请求失败: ' + e.message, 'agent')
@@ -147,6 +161,19 @@ async function send() {
                 if (parsed.content) {
                   full += parsed.content
                   bubble.innerHTML = marked(full)
+                  const existingStats = bubble.querySelector('.stats')
+                  if (existingStats) existingStats.remove()
+                } else if (parsed.stats) {
+                  const old = bubble.querySelector('.stats')
+                  if (old) old.remove()
+                  const statsDiv = document.createElement('div')
+                  statsDiv.className = 'stats'
+                  const s = parsed.stats
+                  statsDiv.innerHTML = '<span>' + s.duration + '</span><span>' + s.model + '</span>'
+                  if (s.in_tokens_h) statsDiv.innerHTML += '<span>\u2191' + s.in_tokens_h + '</span>'
+                  if (s.out_tokens_h) statsDiv.innerHTML += '<span>\u2193' + s.out_tokens_h + '</span>'
+                  if (s.ctx_max_h) statsDiv.innerHTML += '<span>ctx ' + s.in_tokens_h + '/' + s.ctx_max_h + ' ' + s.ctx_pct + '</span>'
+                  bubble.appendChild(statsDiv)
                 } else if (parsed.error) {
                   bubble.textContent = '错误: ' + parsed.error
                 }

@@ -25,6 +25,7 @@ import (
 	"MiniGoAgent/protocol"
 	"MiniGoAgent/tools"
 	"MiniGoAgent/tools/log"
+	"MiniGoAgent/tools/sessionlog"
 )
 
 //go:embed frontend/index.html
@@ -35,7 +36,26 @@ var frontendFS embed.FS
 type chatModel struct {
 	proto protocol.Protocol
 	tools []*schema.ToolInfo
-	mu    sync.Mutex
+	model string
+}
+
+func (m *chatModel) StatsLine() string {
+	type telProvider interface{ GetTelemetry() *protocol.Telemetry }
+	p, ok := m.proto.(telProvider)
+	if !ok {
+		return m.model
+	}
+	return p.GetTelemetry().FormatLine(" · ")
+}
+
+func (m *chatModel) StatsJSON() string {
+	type telProvider interface{ GetTelemetry() *protocol.Telemetry }
+	p, ok := m.proto.(telProvider)
+	if !ok {
+		return ""
+	}
+	data, _ := json.Marshal(p.GetTelemetry().FormatMap())
+	return string(data)
 }
 
 func toProtoMsg(m *schema.Message) protocol.Message {
@@ -88,14 +108,10 @@ func fromProtoResp(resp *protocol.Response) *schema.Message {
 }
 
 func (m *chatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	m.mu.Lock()
-	tools := m.tools
-	m.mu.Unlock()
-
 	common := model.GetCommonOptions(nil, opts...)
 	req := protocol.Request{
 		Messages:  toProtoMsgs(input),
-		Tools:     toProtoTools(tools),
+		Tools:     toProtoTools(m.tools),
 		MaxTokens: common.MaxTokens,
 		Stop:      common.Stop,
 	}
@@ -119,14 +135,10 @@ func (m *chatModel) Generate(ctx context.Context, input []*schema.Message, opts 
 }
 
 func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	m.mu.Lock()
-	tools := m.tools
-	m.mu.Unlock()
-
 	common := model.GetCommonOptions(nil, opts...)
 	req := protocol.Request{
 		Messages:  toProtoMsgs(input),
-		Tools:     toProtoTools(tools),
+		Tools:     toProtoTools(m.tools),
 		MaxTokens: common.MaxTokens,
 		Stop:      common.Stop,
 	}
@@ -160,16 +172,17 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 }
 
 func (m *chatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return &chatModel{proto: m.proto, tools: tools}, nil
+	return &chatModel{proto: m.proto, model: m.model, tools: tools}, nil
 }
 
 // ---------- HTTP Server ----------
 
 type chatServer struct {
-	agent    *react.Agent
-	sessions map[string][]*schema.Message
+	agent          *react.Agent
+	llm            *chatModel
+	sessions       map[string][]*schema.Message
 	defaultSession string
-	mu       sync.Mutex
+	mu             sync.Mutex
 }
 
 type chatReq struct {
@@ -177,6 +190,7 @@ type chatReq struct {
 }
 type chatResp struct {
 	Reply string `json:"reply"`
+	Stats any    `json:"stats,omitempty"`
 }
 
 func main() {
@@ -197,7 +211,7 @@ func main() {
 	if err != nil {
 		log.Fatal("创建 Protocol 失败: %v", err)
 	}
-	llm := &chatModel{proto: proto}
+	llm := &chatModel{proto: proto, model: getEnv("OPENAI_MODEL", "deepseek-v4-flash")}
 
 	terminalTool, _ := utils.InferTool("terminal", "在 Windows 终端执行 shell 命令", tools.RunTerminal)
 	searchTool, _ := utils.InferTool("web_search", "在互联网上搜索信息", tools.WebSearch)
@@ -228,7 +242,7 @@ func main() {
 		log.Fatal("创建 Agent 失败: %v", err)
 	}
 
-	srv := &chatServer{agent: agent, sessions: map[string][]*schema.Message{}, defaultSession: "default"}
+	srv := &chatServer{agent: agent, llm: llm, sessions: map[string][]*schema.Message{}, defaultSession: "default"}
 	srv.loadHistory()
 	http.HandleFunc("/", srv.serveFrontend)
 	http.HandleFunc("/api/chat", srv.handleChat)
@@ -282,6 +296,11 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	msgs = append(msgs, schema.UserMessage(req.Message))
 	s.mu.Unlock()
 
+	// session log
+	if sl := sessionlog.Open(sid); sl != nil {
+		sl.LogUser(req.Message)
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -291,7 +310,13 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := s.agent.Stream(context.Background(), msgs)
+	ctx := context.WithValue(context.Background(), protocol.CtxLogf, func(f string, a ...any) {
+		log.Debug(f, a...)
+		if sl := sessionlog.Get(sid); sl != nil {
+			sl.LogRaw(f, a)
+		}
+	})
+	stream, err := s.agent.Stream(ctx, msgs)
 	if err != nil {
 		fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
 		flusher.Flush()
@@ -320,6 +345,13 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		fullContent.WriteString(chunk.Content)
 	}
+
+	// stats
+	if statsJSON := s.llm.StatsJSON(); statsJSON != "" {
+		fmt.Fprintf(w, "data: {\"stats\":%s}\n\n", statsJSON)
+		flusher.Flush()
+	}
+
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
@@ -328,6 +360,15 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	msgs = append(msgs, &schema.Message{Role: schema.Assistant, Content: fullContent.String()})
 	s.sessions[sid] = msgs
 	s.mu.Unlock()
+
+	// session log assistant response
+	if sl := sessionlog.Get(sid); sl != nil {
+		snippet := fullContent.String()
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		sl.WriteAssistantResponse("", snippet, fullContent.String(), s.llm.StatsLine())
+	}
 }
 
 func (s *chatServer) sessionID(r *http.Request) string {
@@ -361,6 +402,11 @@ func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	sid := s.sessionID(r)
 	msgs := s.messages(sid)
 
+	// session log
+	if sl := sessionlog.Open(sid); sl != nil {
+		sl.LogUser(req.Message)
+	}
+
 	// detect local image path in message
 	if fp := extractLocalImagePath(req.Message); fp != "" {
 		data, err := os.ReadFile(fp)
@@ -377,14 +423,41 @@ func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msgs = append(msgs, schema.UserMessage(req.Message))
-	result, err := s.agent.Generate(context.Background(), msgs)
+	ctx := context.WithValue(context.Background(), protocol.CtxLogf, func(f string, a ...any) {
+		log.Debug(f, a...)
+		if sl := sessionlog.Get(sid); sl != nil {
+			sl.LogRaw(f, a)
+		}
+	})
+	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
 	msgs = append(msgs, result)
 	s.sessions[sid] = msgs
-	json.NewEncoder(w).Encode(chatResp{Reply: result.Content})
+
+	// stats
+	statsLine := s.llm.StatsLine()
+	if statsLine == "" {
+		statsLine = s.llm.model
+	}
+
+	// session log assistant
+	if sl := sessionlog.Get(sid); sl != nil {
+		snippet := result.Content
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		sl.WriteAssistantResponse("", snippet, result.Content, statsLine)
+	}
+
+	type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
+	var statsMap any
+	if p, ok := s.llm.proto.(statsProvider); ok {
+		statsMap = p.GetTelemetry().FormatMap()
+	}
+	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: statsMap})
 }
 
 type visionReq struct {
@@ -416,14 +489,25 @@ func (s *chatServer) handleVisionInternal(w http.ResponseWriter, sid, img, promp
 	msg := schema.UserMessage(userMsg)
 	msgs := s.messages(sid)
 	msgs = append(msgs, msg)
-	result, err := s.agent.Generate(context.Background(), msgs)
+	ctx := context.WithValue(context.Background(), protocol.CtxLogf, func(f string, a ...any) {
+		log.Debug(f, a...)
+		if sl := sessionlog.Get(sid); sl != nil {
+			sl.LogRaw(f, a)
+		}
+	})
+	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
 	msgs = append(msgs, result)
 	s.sessions[sid] = msgs
-	json.NewEncoder(w).Encode(chatResp{Reply: result.Content})
+	type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
+	var statsMap any
+	if p, ok := s.llm.proto.(statsProvider); ok {
+		statsMap = p.GetTelemetry().FormatMap()
+	}
+	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: statsMap})
 }
 
 // ---------- history persistence ----------
@@ -431,6 +515,7 @@ func (s *chatServer) handleVisionInternal(w http.ResponseWriter, sid, img, promp
 const historyFile = "history.json"
 
 func (s *chatServer) saveHistory() {
+	sessionlog.CloseAll()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.sessions) == 0 {
