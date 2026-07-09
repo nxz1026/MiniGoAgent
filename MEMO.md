@@ -1,0 +1,356 @@
+# MiniGoAgent 项目备忘录
+
+> 最后更新：2026-07-09
+> 用途：给 LLM 提供完整项目上下文，避免重复发现
+
+---
+
+## 项目概述
+
+MiniGoAgent 是一个基于 Go + eino 框架的最小化 LLM Agent 项目，提供 Web UI 交互界面，支持流式聊天、终端命令执行、联网搜索、文件操作、图片识别等能力，并具备多会话隔离、历史持久化、全链路日志等工程化特性。
+
+核心定位：**低依赖、可插拔协议层、全链路可观测**。协议层零 eino 依赖，通过独立类型和工厂注册模式支持多供应商（OpenAI/DeepSeek/Zhipu/MiniMax 等），各层职责清晰，方便扩展。
+
+---
+
+## 一、项目定位
+
+Go + eino 框架的最小化 LLM Agent。核心目标：**低依赖、可插协议层、全链路可观测**。
+
+关键约束：
+- Go 1.26.5，GOPROXY `https://goproxy.cn,direct`
+- eino 库本地依赖，路径 `reference/eino`（go.mod replace）。新机器需要先 `git clone https://github.com/cloudwego/eino.git reference/eino`
+- 零 paid API 依赖，倾向免费额度
+- Windows 开发环境（PowerShell）
+
+---
+
+## 二、架构总览
+
+```
+Browser (SSE)
+    │
+    ▼
+HTTP Server (main.go) ── sessionlog ── logs/sessions/<id>/*.md
+    │
+    ▼
+react.Agent (eino) ── chatModel (adapter)
+    │                       │
+    ├── 工具执行            │
+    └── chatModel.Generate/Stream
+                            │
+                            ▼
+                        protocol.Protocol (interface)
+                            │
+                            └── protocol.OpenAI
+                                ├── Vendor detection (host.go)
+                                ├── HTTP retry (retry.go)
+                                ├── SSE reader (openai.go)
+                                ├── Content compression (content_*.go)
+                                ├── Telemetry.Record (telemetry.go)
+                                └── CtxLogf raw logging
+```
+
+### 分层说明
+
+| 层 | 职责 | 关键设计 |
+|-----|---------|-----------|
+| `main.go` | HTTP server + Agent 组装 + 会话管理 | 无框架，纯 net/http |
+| `chatModel` | eino ↔ protocol 适配层 | 实现 model.ChatModel / Streamable |
+| `protocol/` | LLM 通信协议层 | **零 eino 依赖**，独立类型 |
+| `tools/` | Agent 可调用的工具 | 每个工具独立文件 |
+| `tools/sessionlog/` | 会话日志 | 每 session 一个 .md 文件 |
+
+---
+
+## 三、核心设计决策
+
+### 3.1 多轮对话
+- **外部维护** `[]*schema.Message` 历史，每次 `agent.Generate/Stream` 传全部
+- `MessageRewriter` 超 6 条截断到最近 6 条 + MessageModifier 注入 system prompt
+- `MaxStep` 设为 12
+
+### 3.2 协议层独立
+- `protocol/` 零 eino 依赖，自己的 `Message`/`ToolCall`/`Chunk`/`Usage` 类型
+- 工厂注册模式：`Register("openai", factory)` / `protocol.New("openai", cfg)`
+- `Protocol` 接口：`Chat(ctx, req) -> (*Response, error)` + `Stream(ctx, req) -> (<-chan Chunk, error)`
+
+### 3.3 压缩策略
+- 在 `toWireMessages()` 序列化时自动触发
+- session 历史存**完整版**不丢数据
+- **Live zone**：从最后一条 `RoleUser` 开始压缩，之前 frozen 历史不动
+- 5 种 content type 检测（JSON/列表/代码/长文/短文本），各自不同压缩策略
+
+### 3.4 统计（Telemetry）
+- `protocol.Telemetry` 在 Raw 层记录，比上层更准
+- `Record(model, vendor, durSec, usage)` — 每次 Chat/Stream 完成后自动调用
+- `FormatLine(" · ")` 生成文本：`47s · auto · ↑92.7k · ↓1.4k · ctx 92.7k/524k 18%`
+- `FormatMap()` 生成 JSON 给前端 SSE event
+- `ModelContextWindow(model)` 查找已知模型 context 上限，未知模型 fallback 524k
+
+### 3.5 日志体系
+
+| 日志 | 位置 | 方式 |
+|------|------|------|
+| 应用日志 | `logs/` | 4 级 (DEBUG/INFO/WARN/ERROR)，stdout + 按天轮转 |
+| 会话日志 | `logs/sessions/<id>/<timestamp>.md` | 表格记录 user/assistant/tool call/raw events |
+| Raw 层日志 | 同上 | 通过 context key `protocol.CtxLogf` 注入 log 函数 |
+
+### 3.6 SseFramer / EventStreamParser
+- 已实现但**未接入**（在 `sse_framer.go`）
+- 原因：HTTP 客户端场景不需要（`net/http` 处理 chunked transfer）
+- 留待 Bedrock 供应商或 raw TCP 代理场景使用
+- 文件内有详细接入说明
+
+### 3.7 工具排序
+- `toWireTools()` 按 name 排序工具数组
+- `sortSchemaKeys()` 递归排序 JSON Schema 中所有 key（字母序）
+- 目的：减少相同逻辑不同序列化导致的 cache miss / diff noise
+
+### 3.8 多 Key 轮转
+- `OpenAI` 持有 `apiKeys []string` + `keyIndex int`
+- 401/403 时 `rotateKey()` 切换到下一个 key
+- 在 `streamWithReconnect` 重试循环中自动触发
+
+### 3.9 Rate Limiter
+- `protocol/ratelimit.go`：token bucket，按 RPM/TPM 限流
+- 每次 `Chat()` 或 `streamWithReconnect()` 入口 `Wait(ctx, tokens)`
+- token 估算：`len(content)/4` 近似
+- `RATE_LIMIT_RPM=0` / `RATE_LIMIT_TPM=0` 关闭
+
+### 3.10 上下文阈值
+- `Telemetry.warnPct` / `Telemetry.comprPct`，默认 40%/50%
+- `Record()` 中比较 `promptTokens / ModelContextWindow * 100`
+- 超过 `warnPct`：`ChunkWarn` / `Response.Warning` 发出预警文本
+- 超过 `comprPct`：标记 `compress=true`，ADK 层收到后调压缩 LLM
+
+### 3.11 可配置超时
+- `StreamTimeout` 从 Config 注入，替代硬编码 120s
+- `readStream` 的 stall watchdog 用 `o.streamTimeout`
+- `http.Client.Timeout = timeout + 30s` 留余量
+
+### 3.12 请求 Body 复用（sync.Pool）
+- `buildBody()` 从 `bodyPool` 获取 `map[string]any`，`json.Marshal` 后归还
+- 减少每次请求的 map 分配，降低 GC 压力
+
+### 3.13 HTTP 连接池调优
+- `DefaultTransport` 克隆 `http.DefaultTransport` 并调参：MaxIdleConns=100，MaxIdleConnsPerHost=10，IdleConnTimeout=90s
+- `protocol.NewHTTPClient(timeout)` 供上层（tools/vision、tools/compress）复用同一 Transport
+- `OpenAI.client` 同样使用调优后的 Transport
+
+### 3.14 RetryNotify
+- `protocol.CtxRetryNotify` context key 携带 `func(attempt, max int)` 回调
+- `SendWithRetry` 每次重试前调用，上层可展示重试进度
+
+### 3.15 StreamInterruptedError + 自动恢复
+- `StreamInterruptedError` 包装已 emit 后的流中断错误，`Emitted` 字段标记是否已输出内容
+- `readStream` 所有 error return 经 `streamErr()` 统一包装
+- `chatModel.Stream` 检测到 `StreamInterruptedError` 后，发送 `[流中断，正在恢复...]` 提示，调用 `forwardChat` 补全响应
+- `forwardChat` 直接走 `proto.Chat`（非 stream），避免二次断线风险
+
+### 3.16 工具参数兜底
+- `sanitizeTool()` 在 `toWireTools()` 中调用：空 name → `unnamed_tool`，空 description → `user-defined tool`
+- 防止 API 因空字段返回 400
+
+### 3.17 Chunk.Error 类型化
+- `Chunk.Error` 从 `string` 改为 `error`，支持 `errors.As` 类型检查
+- 所有 `Chunk{Type: ChunkError, Error: ...}` 统一传 error 对象
+
+### 3.18 Per-Host 连接池调优
+- `DefaultTransport` 克隆 `http.DefaultTransport`：MaxIdleConns=100，MaxIdleConnsPerHost=20，MaxConnsPerHost=50，IdleConnTimeout=120s
+- `OpenAI.client` 与 `tools/vision`、`tools/compress` 共享同一 Transport，减少连接创建开销
+
+### 3.19 断路器（Circuit Breaker）
+- `CircuitBreaker` 状态机：Closed → Open → HalfOpen → Closed
+- `vendorCircuitBreaker map[Vendor]*CircuitBreaker` 按供应商独立计数
+- `SendWithRetry` 每次失败调用 `Check(err)`，401/403 调用 `Success()` 重置
+- 防止单供应商故障风暴，自动隔离 + 超时恢复
+
+---
+
+## 四、文件地图
+
+```
+MiniGoAgent/
+├── main.go                        # HTTP server + agent assembly + session persistence
+├── protocol/                      # Protocol layer (zero eino deps)
+│   ├── types.go                   # Message/ToolCall/Chunk/Usage/Protocol interface
+│   ├── openai.go                  # OpenAI-compatible provider + SSE reader + raw logger
+│   ├── host.go                    # Vendor detection + Vendor.String()
+│   ├── retry.go                   # HTTP retry with exponential backoff + jitter
+│   ├── think.go                   # MiniMax <think> tag inline reasoning parser
+│   ├── normalize.go               # Tool call pairing repair (broken JSON, orphans, backfill)
+│   ├── schema_canonicalize.go     # JSON Schema normalization
+│   ├── telemetry.go               # Stats collector: Record/FormatLine/FormatMap/ModelContextWindow
+│   ├── content_detector.go        # 5 content type detection
+│   ├── content_compress.go        # Per-type compression strategies
+│   ├── sse_framer.go              # Byte-level SSE + Bedrock EventStream (declared, not wired)
+│   ├── ratelimit.go               # Token bucket rate limiter (RPM/TPM)
+│   ├── protocol_test.go           # 25 unit tests (mock server)
+│   └── openai_integration_test.go # 9 integration tests
+├── tools/                         # Agent tools
+│   ├── terminal.go                # Shell command execution
+│   ├── websearch.go               # Web search
+│   ├── compress.go                # Text compression
+│   ├── fileops.go                 # Read/Write/Edit/Glob/Grep
+│   ├── vision.go                  # Image analysis (StepFun)
+│   ├── cache.go                   # Terminal result cache (30s TTL)
+│   ├── vision_test.go              # Vision smoke test（1 个）
+│   ├── compress_test.go            # Compress smoke test（1 个）
+│   ├── filter/                    # Output filter framework (RTK-style)
+│   ├── log/                       # Application logging (4 levels + rotation)
+│   └── sessionlog/                # Per-session .md log
+├── frontend/
+│   └── index.html                 # Web UI (SSE streaming, markdown, image paste)
+└── reference/                     # Reference codebases (eino, headroom, RTK, DeepSeek-Reasonix, opencode, hermes-agent)
+```
+
+---
+
+## 五、关键模式 / 套路
+
+### 5.1 新增供应商
+```go
+// 1. host.go: 加 Vendor 枚举 + IsXxx() + DetectVendor case + String() case
+// 2. openai.go init(): 注册 factory
+// 3. openai.go NewOpenAI(): 加 switch case 设 policy
+// 4. telemetry.go ModelContextWindow(): 加 context window
+```
+
+### 5.2 新增工具
+```go
+// 1. tools/xxx.go: 实现工具函数 + RegisterTool
+// 2. main.go main(): s.llm.WithTools() 注册
+```
+
+### 5.3 读取 Telemetry（上层用）
+```go
+type telProvider interface{ GetTelemetry() *protocol.Telemetry }
+if p, ok := m.proto.(telProvider); ok {
+    line := p.GetTelemetry().FormatLine(" · ")    // 文本
+    m := p.GetTelemetry().FormatMap()              // JSON
+}
+```
+
+### 5.4 context 注入 Raw 日志
+```go
+ctx := context.WithValue(ctx, protocol.CtxLogf, func(f string, a ...any) {
+    log.Debug(f, a...)
+    if sl := sessionlog.Get(sid); sl != nil {
+        sl.LogRaw(f, a)
+    }
+})
+```
+
+---
+
+## 六、测试
+
+```bash
+go clean -testcache
+go test ./protocol/ -v                # 25 单元测试（无需网络）
+go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
+```
+
+---
+
+## 七、已知约束 / 待改进
+
+- SseFramer / EventStreamParser 已实现但被 `//go:build never` 排除编译（见 `sse_framer.go` 头部说明）
+- 非 OpenAI 供应商的兼容性测试不足（Mock 测试覆盖了 retry/reconnect/think tag 行为）
+- Vision HTTP handler 同时作为 agent tool 注册，agent 可主动调用（但非流式）
+- eino 依赖本地路径 `replace`，非 go.mod 标准发布（README 已标注构建步骤）
+
+---
+
+## 八、README 文件说明
+
+项目根目录有两份 README：
+
+| 文件 | 用途 |
+|------|------|
+| `README.md` | 首页展示，简洁功能+配置，中英文合版 |
+| `README.detail.md` | 技术细节版（原 `README.md` 改名），含完整架构/协议层/项目结构/测试 |
+
+`reference/` 目录下各第三方参考代码自带其 README，非 MiniGoAgent 项目文档。
+
+---
+
+## 九、本次会话（2026-07-09）变更摘要
+
+### 第一轮：Telemetry + 内容压缩 + 会话日志 + README 拆分
+
+1. `protocol/telemetry.go` 新增：Telemetry 结构体 + Record/FormatLine/FormatMap/ModelContextWindow
+2. `protocol/openai.go`：OpenAI 嵌入 Telemetry，Chat/Stream 完成后自动 Record；logf 签名改为 logf(ctx, ...)
+3. `protocol/host.go`：Vendor 加 String() 方法
+4. `main.go`：chatModel 去掉本地 stats，改为 StatsLine()/StatsJSON() 委托 protocol.Telemetry；chatResp 加 Stats 字段
+5. `frontend/index.html`：stats 卡片样式 + SSE/non-SSE 解析渲染
+6. `README.md → README.detail.md`：原技术文档改名为 detail，首页 README.md 重写为简洁功能+配置版
+7. `tools/sessionlog/sessionlog.go`：新增 LogRaw 方法
+8. `protocol/content_detector.go` + `content_compress.go`：5 种内容类型检测 + 按类型压缩策略
+9. `protocol/sse_framer.go`：字节级 SSE 帧解析 + Bedrock EventStream（声明未接入）
+
+### 第二轮：多 Key 轮转 + Rate Limiter + 上下文阈值 + 可配置超时
+
+10. `protocol/ratelimit.go` 新增：Token bucket 限流器（RPM/TPM）
+11. `protocol/types.go`：Config 加 APIKeys/StreamTimeout/RateLimitRPM/TPM/ContextWarnPct/CompressPct
+12. `protocol/openai.go`：`NewOpenAI(apiKey, baseURL, model)` → `NewOpenAI(cfg Config)`；多 key 轮转；rate limiter 入口 wait；`sendContextWarning()`
+13. `protocol/telemetry.go`：Record 返回 `(warn, compress bool)`, SetThresholds, LastWarning
+14. `main.go`：读新 env 传给 Config；加 `getEnvInt`/`splitEnv` 辅助函数
+15. `.env`：添加新参数占位（OPENAI_API_KEYS/STREAM_TIMEOUT/RATE_LIMIT_*/CONTEXT_*）
+16. `README.md` + `README.detail.md`：更新配置表和协议层特性
+
+### 第三轮（2026-07-09）：Context 修复 + 常量可配置 + Vision tool + 代码重构 + History DTO + 测试 + 文档
+
+17. `main.go`：3 处 `context.Background()` → `r.Context()`，请求取消可传播到 agent/LLM；`handleVisionInternal` 加 `ctx` 参数
+18. `protocol/types.go` + `openai.go`：`MaxReconnect` 加入 Config，替代硬编码 `maxReconnectAttempts=3`
+19. `main.go` + `.env` + `README.md`：`AGENT_MAX_STEP` / `MAX_RECONNECT_ATTEMPTS` 从 env 读取
+20. `main.go`：Vision 注册为 agent tool（`utils.InferTool("vision", ...)`），agent 可主动调用图片分析
+21. `main.go`：提取 `logUserMessage` / `logAssistantResponse` / `injectLogCtx` / `getStatsMap` 四个 helper，handler 去重
+22. `main.go`：History 持久化改用独立 DTO（`historyMessage`/`historyToolCall`），隔离 eino `schema.Message`
+23. `protocol/sse_framer.go`：加 `//go:build never` 排除编译，避免死代码误读
+24. `main_test.go` 新增：7 个测试覆盖 `getEnv`/`getEnvInt`/`splitEnv`/`extractLocalImagePath`/DTO 序列化/`loadEnv`
+25. `tools/cache_test.go` + `tools/fileops_test.go` 新增：4 个测试覆盖缓存逻辑和文件操作
+26. `README.md` + `README.detail.md` + `MEMO.md`：文档同步更新（工具计数、构建步骤、配置表、测试命令）
+
+### 第四轮（2026-07-09）：RAW 协议层性能 + 健壮性优化
+
+27. `protocol/openai.go`：`bodyPool` sync.Pool 复用 `map[string]any`，`buildBody` 减少 GC 分配
+28. `protocol/openai.go`：`DefaultTransport` 克隆默认 Transport 调参（MaxIdleConns=100，MaxIdleConnsPerHost=20，MaxConnsPerHost=50，IdleConnTimeout=120s），`NewHTTPClient` 导出供上层复用
+29. `protocol/retry.go`：`SendWithRetry` 从 ctx 读取 `CtxRetryNotify` 回调，每次重试前通知上层
+30. `protocol/types.go`：新增 `StreamInterruptedError` 类型，包装已 emit 后的流中断错误
+31. `protocol/openai.go`：`readStream` 所有 error return 经 `streamErr()` 统一包装为 `StreamInterruptedError`；`Chunk.Error` 从 `string` 改为 `error`
+32. `main.go`：`chatModel.Stream` 检测 `StreamInterruptedError` 后发恢复提示，调用 `forwardChat` 补全响应
+33. `tools/vision.go` + `tools/compress.go`：改用 `protocol.NewHTTPClient`，复用共享 Transport
+34. `protocol/openai.go`：`sanitizeTool()` 为空 name/description 赋 fallback，防止 API 400
+35. `protocol/protocol_test.go`：新增 5 个测试（`TestStreamInterruptedError_Wrap`、`TestStreamInterruptedError_MockStreamEmitThenDisconnect`、`TestStreamInterruptedError_MockStreamEmitThenAPIError`、`TestSanitizeTool`、`TestRetryNotifyContext`）
+36. `go.mod`：eino replace 路径 `../eino` → `./reference/eino`
+37. `README.md` + `README.detail.md` + `MEMO.md`：文档同步更新（eino 路径、协议层新特性、测试计数）
+
+### 第五轮（2026-07-09）：Phase 1 断路器 + 连接池细化
+
+38. `protocol/types.go`：新增 `CircuitBreakerState`/`CircuitBreakerOptions`/`CircuitBreaker` 类型，含 `Check(err)`/`Success()`/`isFailure()` 方法，状态机 Closed→Open→HalfOpen
+39. `protocol/retry.go`：新增 `var vendorCircuitBreaker = make(map[Vendor]*CircuitBreaker)`；`SendWithRetry` 每次 attempt 前调用 `Check(nil)` 短路已 Open 的 breaker，transient error 后调用 `Check(err)`，401/403 后调用 `Success()` 重置
+40. `protocol/protocol_test.go`：新增 5 个测试（`TestCircuitBreaker_Closed`/`Open`/`HalfOpen`、`TestSendWithRetry_CircuitBreakerIntegration`、`TestSendWithRetry_CircuitBreakerAuthSuccess`），protocol 单测总数变为 25 个
+41. `protocol/protocol_test.go`：新增 `TestBodyPoolReuse`、`TestDefaultTransportParams`，验证 buildBody 输出一致性及 Transport 参数
+42. `main_test.go`：新增 `TestForwardChat`，验证恢复路径直接调用 `proto.Chat`
+43. `tools/vision_test.go` + `tools/compress_test.go`：新增 smoke test，验证 Vision/Compress 工具通过 `protocol.NewHTTPClient` 正常请求
+44. `README.md` + `README.detail.md` + `MEMO.md`：文档同步更新（eino 路径、协议层新特性、测试计数）
+
+### 第六轮（2026-07-09）：EventBus + Health + ContentPredictor + Telemetry 增强
+
+45. `protocol/stream.go` 新增：`EventBus`（pub/sub 架构）+ `ChunkProcessor` 接口 + `telemetryProcessor` + `logProcessor`，`readStream` 每次 emit 经 `eventBus.Publish` 广播给订阅者
+46. `protocol/telemetry.go`：`Telemetry` 新增 `chunkBytes`/`toolCalls`/`errors` 字段 + `RecordChunkBytes()`/`RecordToolCall()`/`RecordError()`/`RecordUsage()`/`Last()` 方法
+47. `protocol/health_check.go` 新增：`HealthChecker` 定时对 vendor endpoint 发 HEAD 请求，关联 `CircuitBreaker`，状态 `HealthUnknown`/`HealthHealthy`/`HealthUnhealthy`/`HealthCircuitOpen`
+48. `protocol/health_manager.go` 新增：`HealthManager` 管理多 vendor `HealthChecker`，`Register()` 启动 goroutine，`GetStatus()` 综合 breaker 状态返回
+49. `protocol/content_predict.go` 新增：`ContentPredictor` 带 SHA256 缓存的内容类型预测器，`Predict()`/`Invalidate()`，默认 `heuristicModel`（预留 ML 接口）
+50. `protocol/openai.go`：`NewOpenAI` 初始化 `EventBus` 并订阅 `telemetry`/`log` 处理器；注册 `vendorHealthManager` 定时健康检查；`readStream` 的 `send` 闭包增加 `eventBus.Publish`
+51. `protocol/retry.go`：`SendWithRetry` 入口增加 `vendorHealthManager.GetStatus()` 短路检查，breaker 失败计数与 health 状态联动
+52. `protocol/types.go`：`Config` 新增 `HealthCheckURL` 字段；`OpenAI` 结构体新增 `eventBus` 字段
+53. `main.go`：`chatModel.Stream` 检测 `StreamInterruptedError` 后发送恢复提示并调用 `forwardChat` 补全响应；提取 `logUserMessage`/`logAssistantResponse`/`injectLogCtx`/`getStatsMap` helper
+54. `tools/compress.go` + `tools/vision.go`：改用 `protocol.NewHTTPClient` 复用共享 `DefaultTransport`
+55. `protocol/protocol_test.go`：新增 8 个测试（`TestEventBus_*` 2 个、`TestContentPredictor_*` 2 个、`TestHealthChecker_*` 2 个、`TestHealthManager_*` 1 个、`TestSendWithRetry_HealthShortCircuit` 1 个），protocol 单测总数变为 38 个
+56. `main_test.go`：新增 `TestForwardChat` 等 8 个测试
+57. `tools/cache_test.go` + `tools/compress_test.go` + `tools/fileops_test.go` + `tools/vision_test.go`：新增 6 个 smoke test
+58. `reference/eino`/`reference/hermes-agent`/`reference/opencode`：克隆上游仓库到 `reference/` 目录，go.mod replace 路径改为 `./reference/eino`
+59. `README.md` + `README.detail.md` + `MEMO.md`：文档同步更新（EventBus/Health/ContentPredictor/Telemetry 增强/测试计数/reference 目录说明）

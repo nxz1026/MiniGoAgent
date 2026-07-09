@@ -14,32 +14,8 @@ import (
 	"time"
 )
 
-const MaxRetries = 10
-const maxBackoff = 15 * time.Second
-const maxAuthRetries = 2
-
-type AuthError struct {
-	Vendor   Vendor
-	Status   int
-	HasKey   bool
-}
-
-func (e *AuthError) Error() string {
-	return fmt.Sprintf("auth error (vendor=%d, status=%d, has_key=%v)", e.Vendor, e.Status, e.HasKey)
-}
-
-type APIError struct {
-	Vendor Vendor
-	Status int
-	Body   string
-}
-
-func (e *APIError) Error() string {
-	if e.Body == "" {
-		return fmt.Sprintf("api error (vendor=%d, status=%d)", e.Vendor, e.Status)
-	}
-	return fmt.Sprintf("api error (vendor=%d, status=%d): %s", e.Vendor, e.Status, e.Body)
-}
+var vendorCircuitBreaker = make(map[Vendor]*CircuitBreaker)
+var vendorHealthManager = NewHealthManager(context.Background())
 
 func retryableStatus(s int) bool {
 	return s == http.StatusRequestTimeout || s == http.StatusTooManyRequests || (s >= 500 && s <= 599)
@@ -98,13 +74,16 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 
 func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 	newReq func(context.Context) (*http.Request, error)) (*http.Response, error) {
-
+		
 	var lastErr error
 	var retryAfter time.Duration
-	authRetries := 0
+	notify, _ := ctx.Value(CtxRetryNotify).(func(attempt, max int))
 
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
 		if attempt > 0 {
+			if notify != nil {
+				notify(attempt, MaxRetries)
+			}
 			delay := backoffDelay(attempt, retryAfter)
 			select {
 			case <-ctx.Done():
@@ -114,6 +93,18 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 		}
 		retryAfter = 0
 
+		if hm := vendorHealthManager; hm != nil {
+			if hm.GetStatus(vendor) == HealthCircuitOpen {
+				return nil, fmt.Errorf("vendor %v unhealthy (circuit open)", vendor)
+			}
+		}
+
+		if nextBreaker := vendorCircuitBreaker[vendor]; nextBreaker != nil {
+			if !nextBreaker.Check(nil) {
+				return nil, fmt.Errorf("circuit breaker open for vendor %v", vendor)
+			}
+		}
+
 		req, err := newReq(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("build request: %w", err)
@@ -122,6 +113,9 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 		if err != nil {
 			if !transientErr(err) {
 				return nil, fmt.Errorf("request failed: %w", err)
+			}
+			if nextBreaker := vendorCircuitBreaker[vendor]; nextBreaker != nil {
+				nextBreaker.Check(err)
 			}
 			lastErr = fmt.Errorf("request failed: %w", err)
 			continue
@@ -136,17 +130,18 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 		resp.Body.Close()
 
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			authErr := &AuthError{Vendor: vendor, Status: resp.StatusCode, HasKey: true}
-			if authRetries < maxAuthRetries {
-				authRetries++
-				lastErr = authErr
-				continue
+			nextBreaker := vendorCircuitBreaker[vendor]
+			if nextBreaker != nil {
+				nextBreaker.Success()
 			}
-			return nil, authErr
-		}
+			return nil, &AuthError{Vendor: vendor, Status: resp.StatusCode, HasKey: true}
+			}
 		apiErr := &APIError{Vendor: vendor, Status: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
 		if !retryableStatus(resp.StatusCode) {
 			return nil, apiErr
+		}
+		if nextBreaker := vendorCircuitBreaker[vendor]; nextBreaker != nil {
+			nextBreaker.Check(apiErr)
 		}
 		lastErr = apiErr
 	}

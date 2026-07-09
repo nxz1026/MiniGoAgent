@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"MiniGoAgent/protocol"
 )
 
 type CompressInput struct {
@@ -53,7 +55,7 @@ func RunCompress(ctx context.Context, input CompressInput) (string, error) {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := protocol.NewHTTPClient(60 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("API请求失败: %w", err)

@@ -22,6 +22,9 @@ type Telemetry struct {
 	comprPct  int
 	lastWarn  bool
 	lastCompr bool
+	chunkBytes int64
+	toolCalls  int64
+	errors     int64
 }
 
 func NewTelemetry() *Telemetry {
@@ -88,6 +91,34 @@ func (t *Telemetry) LastWarning() (warn, compress bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.lastWarn, t.lastCompr
+}
+
+func (t *Telemetry) RecordChunkBytes(n int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.chunkBytes += n
+}
+
+func (t *Telemetry) RecordToolCall() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.toolCalls++
+}
+
+func (t *Telemetry) RecordError() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.errors++
+}
+
+func (t *Telemetry) RecordUsage(usage *Usage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if usage == nil {
+		return
+	}
+	t.last.PromptTokens = usage.PromptTokens
+	t.last.CompletionTokens = usage.CompletionTokens
 }
 
 func (t *Telemetry) Last() CallRecord {

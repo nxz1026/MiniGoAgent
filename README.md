@@ -8,22 +8,30 @@ Minimal LLM Agent powered by Go + [eino](https://github.com/cloudwego/eino) — 
 
 - Web UI with SSE streaming, markdown, image paste
 - Multi-session: `?session=<id>` isolates conversations
-- ReAct agent loop (up to 12 steps), auto tool-call repair
-- 8 tools: terminal, web search, text compression, read/write/edit/glob/grep files, image analysis
+- ReAct agent loop (configurable max steps, default 12), auto tool-call repair
+- 9 tools: terminal, web search, text compression, read/write/edit/glob/grep files, image analysis
 - Command-aware output filter, 30s TTL result cache
 - Per-session `.md` logs, auto-save on Ctrl+C
 - Telemetry card inline in chat: `47s · auto · ↑92.7k · ↓1.4k · ctx 92.7k/524k 18%`
 - Multi-provider: OpenAI, DeepSeek, Zhipu, MiniMax, LongCat, Ollama Cloud, MiMo
+- Stream interruption auto-recovery: transparent fallback on mid-stream disconnect
+- Per-host connection pool: MaxConnsPerHost=50 with shared HTTP transport
+- Circuit breaker: per-vendor failure isolation and auto-recovery
 
 ---
 
 ## Quick Start
 
 ```bash
+# 1. Clone eino to sibling directory (required: go.mod uses replace directive)
+git clone https://github.com/cloudwego/eino.git reference/eino
+
+# 2. Configure
 set OPENAI_API_KEY=your_key
 set OPENAI_BASE_URL=https://api.example.com/v1
 set OPENAI_MODEL=deepseek-v4-flash
 
+# 3. Run
 go run .
 # Open http://localhost:8080
 ```
@@ -58,6 +66,8 @@ docker run -p 8080:8080 \
 | `RATE_LIMIT_TPM` | `0` | Max tokens per minute (0=off) |
 | `CONTEXT_WARN_PCT` | `40` | Context warning threshold (%) |
 | `CONTEXT_COMPRESS_PCT` | `50` | Context compression signal (%) |
+| `AGENT_MAX_STEP` | `12` | Max ReAct agent loop steps |
+| `MAX_RECONNECT_ATTEMPTS` | `3` | SSE stream reconnect attempts |
 
 ---
 
@@ -77,22 +87,30 @@ See [README.detail.md](README.detail.md) for architecture, protocol layer, proje
 
 - Web UI：SSE 流式输出、Markdown 渲染、粘贴图片
 - 多会话：`?session=<id>` 隔离对话历史
-- ReAct Agent 循环（最多 12 步），自动修复工具调用
-- 8 个工具：终端、搜索、压缩、读写编辑文件、Glob、Grep、图片分析
+- ReAct Agent 循环（最大步数可配置，默认 12），自动修复工具调用
+- 9 个工具：终端、搜索、压缩、读写编辑文件、Glob、Grep、图片分析
 - 输出过滤 + 30s 缓存，命令感知
 - 每会话独立 .md 日志，Ctrl+C 自动保存
 - 统计卡片内联显示：`47s · auto · ↑92.7k · ↓1.4k · ctx 92.7k/524k 18%`
 - 多供应商：OpenAI、DeepSeek、Zhipu、MiniMax、LongCat、Ollama Cloud、MiMo
+- 流中断自动恢复：中途断线后静默重连补全，不丢对话上下文
+- Per-Host 连接池：共享 Transport，MaxConnsPerHost=50
+- 断路器：按供应商故障隔离 + 自动恢复
 
 ---
 
 ## 快速开始
 
 ```bash
+# 1. 克隆 eino 到 reference 目录（go.mod 使用了 replace 指令）
+git clone https://github.com/cloudwego/eino.git reference/eino
+
+# 2. 配置环境变量
 set OPENAI_API_KEY=your_key
 set OPENAI_BASE_URL=https://api.example.com/v1
 set OPENAI_MODEL=deepseek-v4-flash
 
+# 3. 运行
 go run .
 # 打开 http://localhost:8080
 ```
@@ -127,6 +145,8 @@ docker run -p 8080:8080 \
 | `RATE_LIMIT_TPM` | `0` | 每分钟 token 限制（0=关闭） |
 | `CONTEXT_WARN_PCT` | `40` | 上下文预警阈值（%） |
 | `CONTEXT_COMPRESS_PCT` | `50` | 上下文压缩触发阈值（%） |
+| `AGENT_MAX_STEP` | `12` | Agent 最大循环步数 |
+| `MAX_RECONNECT_ATTEMPTS` | `3` | SSE 流重连次数 |
 
 ---
 

@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -159,18 +160,33 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 	}
 
 	sr, sw := schema.Pipe[*schema.Message](64)
-	go func() {
-		defer sw.Close()
-		for chunk := range ch {
-			switch chunk.Type {
-			case protocol.ChunkText:
-				sw.Send(&schema.Message{Role: schema.Assistant, Content: chunk.Text}, nil)
-			case protocol.ChunkError:
-				return
+		go func() {
+			defer sw.Close()
+			for chunk := range ch {
+				switch chunk.Type {
+				case protocol.ChunkText:
+					sw.Send(&schema.Message{Role: schema.Assistant, Content: chunk.Text}, nil)
+				case protocol.ChunkError:
+					var interrupted *protocol.StreamInterruptedError
+					if chunk.Error != nil && errors.As(chunk.Error, &interrupted) {
+						sw.Send(&schema.Message{Role: schema.Assistant, Content: "[流中断，正在恢复...]"}, nil)
+						resp, err := m.forwardChat(ctx, req)
+						if err != nil {
+							return
+						}
+						if resp.Content != "" {
+							sw.Send(&schema.Message{Role: schema.Assistant, Content: resp.Content}, nil)
+						}
+					}
+					return
+				}
 			}
-		}
-	}()
-	return sr, nil
+		}()
+		return sr, nil
+	}
+
+func (m *chatModel) forwardChat(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
+	return m.proto.Chat(ctx, req)
 }
 
 func (m *chatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -216,6 +232,7 @@ func main() {
 		RateLimitTPM:       getEnvInt("RATE_LIMIT_TPM", 0),
 		ContextWarnPct:     getEnvInt("CONTEXT_WARN_PCT", 40),
 		ContextCompressPct: getEnvInt("CONTEXT_COMPRESS_PCT", 50),
+		MaxReconnect:       getEnvInt("MAX_RECONNECT_ATTEMPTS", 3),
 	})
 	if err != nil {
 		log.Fatal("创建 Protocol 失败: %v", err)
@@ -230,11 +247,12 @@ func main() {
 	editFileTool, _ := utils.InferTool("edit_file", "在文件中查找替换文本", tools.EditFile)
 	globTool, _ := utils.InferTool("glob", "按 glob 模式搜索文件", tools.GlobFiles)
 	grepTool, _ := utils.InferTool("grep", "在文件中搜索文本", tools.GrepFiles)
+	visionTool, _ := utils.InferTool("vision", "分析图片内容，支持URL和base64 data URI", tools.RunVision)
 
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel:   llm,
-		ToolsConfig:        compose.ToolsNodeConfig{Tools: []tool.BaseTool{terminalTool, searchTool, compressTool, readFileTool, writeFileTool, editFileTool, globTool, grepTool}},
-		MaxStep:            12,
+		ToolsConfig:        compose.ToolsNodeConfig{Tools: []tool.BaseTool{terminalTool, searchTool, compressTool, readFileTool, writeFileTool, editFileTool, globTool, grepTool, visionTool}},
+		MaxStep:            getEnvInt("AGENT_MAX_STEP", 12),
 		ToolReturnDirectly: map[string]struct{}{"compress": {}},
 		MessageRewriter: func(ctx context.Context, msgs []*schema.Message) []*schema.Message {
 			if len(msgs) <= 6 {
@@ -305,10 +323,7 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	msgs = append(msgs, schema.UserMessage(req.Message))
 	s.mu.Unlock()
 
-	// session log
-	if sl := sessionlog.Open(sid); sl != nil {
-		sl.LogUser(req.Message)
-	}
+	s.logUserMessage(sid, req.Message)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -319,12 +334,7 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.WithValue(context.Background(), protocol.CtxLogf, func(f string, a ...any) {
-		log.Debug(f, a...)
-		if sl := sessionlog.Get(sid); sl != nil {
-			sl.LogRaw(f, a)
-		}
-	})
+	ctx := s.injectLogCtx(r.Context(), sid)
 	stream, err := s.agent.Stream(ctx, msgs)
 	if err != nil {
 		fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
@@ -370,14 +380,40 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	s.sessions[sid] = msgs
 	s.mu.Unlock()
 
-	// session log assistant response
+	s.logAssistantResponse(sid, fullContent.String())
+}
+
+func (s *chatServer) logUserMessage(sid, text string) {
+	if sl := sessionlog.Open(sid); sl != nil {
+		sl.LogUser(text)
+	}
+}
+
+func (s *chatServer) logAssistantResponse(sid, content string) {
 	if sl := sessionlog.Get(sid); sl != nil {
-		snippet := fullContent.String()
+		snippet := content
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		sl.WriteAssistantResponse("", snippet, fullContent.String(), s.llm.StatsLine())
+		sl.WriteAssistantResponse("", snippet, content, s.llm.StatsLine())
 	}
+}
+
+func (s *chatServer) injectLogCtx(ctx context.Context, sid string) context.Context {
+	return context.WithValue(ctx, protocol.CtxLogf, func(f string, a ...any) {
+		log.Debug(f, a...)
+		if sl := sessionlog.Get(sid); sl != nil {
+			sl.LogRaw(f, a)
+		}
+	})
+}
+
+func (s *chatServer) getStatsMap() any {
+	type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
+	if p, ok := s.llm.proto.(statsProvider); ok {
+		return p.GetTelemetry().FormatMap()
+	}
+	return nil
 }
 
 func (s *chatServer) sessionID(r *http.Request) string {
@@ -405,16 +441,9 @@ func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatReq
 	json.NewDecoder(r.Body).Decode(&req)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	sid := s.sessionID(r)
-	msgs := s.messages(sid)
 
-	// session log
-	if sl := sessionlog.Open(sid); sl != nil {
-		sl.LogUser(req.Message)
-	}
+	s.logUserMessage(sid, req.Message)
 
 	// detect local image path in message
 	if fp := extractLocalImagePath(req.Message); fp != "" {
@@ -427,46 +456,29 @@ func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// route to vision if it's an image
 	if strings.HasPrefix(req.Message, "data:image/") {
-		s.handleVisionInternal(w, sid, req.Message, "描述这张图片")
+		s.handleVisionInternal(r.Context(), w, sid, req.Message, "描述这张图片")
 		return
 	}
 
+	s.mu.Lock()
+	msgs := s.messages(sid)
 	msgs = append(msgs, schema.UserMessage(req.Message))
-	ctx := context.WithValue(context.Background(), protocol.CtxLogf, func(f string, a ...any) {
-		log.Debug(f, a...)
-		if sl := sessionlog.Get(sid); sl != nil {
-			sl.LogRaw(f, a)
-		}
-	})
+	s.mu.Unlock()
+	ctx := s.injectLogCtx(r.Context(), sid)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
+	s.mu.Lock()
+	msgs = s.messages(sid)
 	msgs = append(msgs, result)
 	s.sessions[sid] = msgs
+	s.mu.Unlock()
 
-	// stats
-	statsLine := s.llm.StatsLine()
-	if statsLine == "" {
-		statsLine = s.llm.model
-	}
+	s.logAssistantResponse(sid, result.Content)
 
-	// session log assistant
-	if sl := sessionlog.Get(sid); sl != nil {
-		snippet := result.Content
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		sl.WriteAssistantResponse("", snippet, result.Content, statsLine)
-	}
-
-	type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
-	var statsMap any
-	if p, ok := s.llm.proto.(statsProvider); ok {
-		statsMap = p.GetTelemetry().FormatMap()
-	}
-	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: statsMap})
+	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 }
 
 type visionReq struct {
@@ -485,10 +497,10 @@ func (s *chatServer) handleVision(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sid := s.sessionID(r)
-	s.handleVisionInternal(w, sid, req.Image, req.Prompt)
+	s.handleVisionInternal(r.Context(), w, sid, req.Image, req.Prompt)
 }
 
-func (s *chatServer) handleVisionInternal(w http.ResponseWriter, sid, img, prompt string) {
+func (s *chatServer) handleVisionInternal(ctx context.Context, w http.ResponseWriter, sid, img, prompt string) {
 	visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: img, Prompt: prompt})
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "Vision 错误: " + err.Error()})
@@ -498,30 +510,100 @@ func (s *chatServer) handleVisionInternal(w http.ResponseWriter, sid, img, promp
 	msg := schema.UserMessage(userMsg)
 	msgs := s.messages(sid)
 	msgs = append(msgs, msg)
-	ctx := context.WithValue(context.Background(), protocol.CtxLogf, func(f string, a ...any) {
-		log.Debug(f, a...)
-		if sl := sessionlog.Get(sid); sl != nil {
-			sl.LogRaw(f, a)
-		}
-	})
+	ctx = s.injectLogCtx(ctx, sid)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
+	s.mu.Lock()
+	msgs = s.messages(sid)
 	msgs = append(msgs, result)
 	s.sessions[sid] = msgs
-	type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
-	var statsMap any
-	if p, ok := s.llm.proto.(statsProvider); ok {
-		statsMap = p.GetTelemetry().FormatMap()
-	}
-	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: statsMap})
+	s.mu.Unlock()
+	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 }
 
-// ---------- history persistence ----------
+// ---------- history persistence (DTO isolated from eino types) ----------
 
 const historyFile = "history.json"
+
+type historyToolCall struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type historyMessage struct {
+	Role             string            `json:"role"`
+	Content          string            `json:"content"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	ToolCalls        []historyToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	Name             string            `json:"name,omitempty"`
+}
+
+func toHistoryMsg(m *schema.Message) historyMessage {
+	hm := historyMessage{
+		Role:             string(m.Role),
+		Content:          m.Content,
+		ReasoningContent: m.ReasoningContent,
+		ToolCallID:       m.ToolCallID,
+		Name:             m.Name,
+	}
+	for _, tc := range m.ToolCalls {
+		hm.ToolCalls = append(hm.ToolCalls, historyToolCall{
+			ID: tc.ID, Type: tc.Type, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+		})
+	}
+	return hm
+}
+
+func fromHistoryMsg(hm historyMessage) *schema.Message {
+	m := &schema.Message{
+		Role:             schema.RoleType(hm.Role),
+		Content:          hm.Content,
+		ReasoningContent: hm.ReasoningContent,
+		ToolCallID:       hm.ToolCallID,
+		Name:             hm.Name,
+	}
+	for _, tc := range hm.ToolCalls {
+		m.ToolCalls = append(m.ToolCalls, schema.ToolCall{
+			ID: tc.ID, Type: tc.Type,
+			Function: schema.FunctionCall{Name: tc.Name, Arguments: tc.Arguments},
+		})
+	}
+	return m
+}
+
+func marshalSessions(sessions map[string][]*schema.Message) ([]byte, error) {
+	dto := make(map[string][]historyMessage, len(sessions))
+	for sid, msgs := range sessions {
+		hmsgs := make([]historyMessage, len(msgs))
+		for i, m := range msgs {
+			hmsgs[i] = toHistoryMsg(m)
+		}
+		dto[sid] = hmsgs
+	}
+	return json.Marshal(dto)
+}
+
+func unmarshalSessions(data []byte) (map[string][]*schema.Message, error) {
+	var dto map[string][]historyMessage
+	if err := json.Unmarshal(data, &dto); err != nil {
+		return nil, err
+	}
+	sessions := make(map[string][]*schema.Message, len(dto))
+	for sid, hmsgs := range dto {
+		msgs := make([]*schema.Message, len(hmsgs))
+		for i, hm := range hmsgs {
+			msgs[i] = fromHistoryMsg(hm)
+		}
+		sessions[sid] = msgs
+	}
+	return sessions, nil
+}
 
 func (s *chatServer) saveHistory() {
 	sessionlog.CloseAll()
@@ -530,7 +612,7 @@ func (s *chatServer) saveHistory() {
 	if len(s.sessions) == 0 {
 		return
 	}
-	data, err := json.Marshal(s.sessions)
+	data, err := marshalSessions(s.sessions)
 	if err != nil {
 		log.Warn("保存历史失败: %v", err)
 		return
@@ -547,8 +629,8 @@ func (s *chatServer) loadHistory() {
 	if err != nil {
 		return
 	}
-	var sessions map[string][]*schema.Message
-	if err := json.Unmarshal(data, &sessions); err != nil {
+	sessions, err := unmarshalSessions(data)
+	if err != nil {
 		log.Warn("读取历史文件失败: %v", err)
 		return
 	}

@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"MiniGoAgent/protocol"
 )
 
 type VisionInput struct {
@@ -66,7 +68,7 @@ func RunVision(ctx context.Context, input VisionInput) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := protocol.NewHTTPClient(60 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("API请求失败: %w", err)
@@ -104,7 +106,7 @@ func fetchImage(ctx context.Context, url string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := protocol.NewHTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

@@ -1,9 +1,54 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
+
+var (
+	compressCache   = map[string]compressCacheEntry{}
+	compressCacheMu sync.RWMutex
+)
+
+type compressCacheEntry struct {
+	result    string
+	timestamp time.Time
+}
+
+const compressCacheTTL = 30 * time.Second
+const compressCacheMax = 500
+
+func CachedCompressContent(content string, ct ContentType) string {
+	if len(content) < 256 {
+		return content
+	}
+	h := sha256.Sum256([]byte(content))
+	key := fmt.Sprintf("%x-%d", h[:8], ct)
+
+	compressCacheMu.RLock()
+	entry, ok := compressCache[key]
+	compressCacheMu.RUnlock()
+	if ok && time.Since(entry.timestamp) < compressCacheTTL {
+		return entry.result
+	}
+
+	result := CompressContent(content, ct)
+
+	compressCacheMu.Lock()
+	if len(compressCache) >= compressCacheMax {
+		for k := range compressCache {
+			delete(compressCache, k)
+			break
+		}
+	}
+	compressCache[key] = compressCacheEntry{result: result, timestamp: time.Now()}
+	compressCacheMu.Unlock()
+	return result
+}
 
 var (
 	reTimestamp = regexp.MustCompile(`^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?\s+`)

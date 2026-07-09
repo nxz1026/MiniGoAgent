@@ -9,7 +9,7 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 - **Web UI** — Chat interface with streaming SSE output, markdown rendering, image paste
 - **Multi-session** — `?session=<id>` isolates conversation histories
 - **Agent Loop** — ReAct agent with up to 12 steps, tool-call pairing repair, message rewriting
-- **8 Tools** — Terminal, web search, text compression, file read/write/edit, glob, grep
+- **9 Tools** — Terminal, web search, text compression, file read/write/edit, glob, grep, vision
 - **Output Filter** — RTK-style, command-aware filtering (ls/git/general), semantic-safe fallback
 - **Result Cache** — 30s TTL for read-only terminal commands
 - **History Persistence** — Auto-save on Ctrl+C, restore on startup
@@ -23,7 +23,7 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 - **Vendor Detection** — Auto-detects DeepSeek, Zhipu, MiniMax, LongCat, Ollama Cloud, MiMo from baseURL
 - **Reasoning Content** — Runtime detection; emits `ChunkReasoning` events on any provider that returns `reasoning_content`
 - **HTTP Retry** — Exponential backoff + jitter, 10 max retries, `Retry-After` support, auth retry
-- **Stream Reconnect** — 3 automatic reconnection attempts before any token emitted
+- **Stream Reconnect** — Configurable reconnection attempts (env `MAX_RECONNECT_ATTEMPTS`, default 3) before any token emitted
 - **Tool Call Normalization** — Broken JSON repair, orphan tool message removal, missing result backfill, name backfill
 - **Think Tag** — MiniMax `&lt;think&gt;...&lt;/think&gt;` inline reasoning parser
 - **Schema Canonicalization** — Ensures valid JSON Schema for tool definitions
@@ -33,11 +33,19 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 - **Telemetry** — `Telemetry.Record()` collects duration/vendor/model/tokens per call; `FormatLine()` / `FormatMap()` for upper layers
 - **Vendor.String()** — Vendor enum now has string representation for telemetry output
 - **Tool/Schema Sorting** — `toWireTools()` sorts tools by name; `sortSchemaKeys()` recursively sorts JSON keys alphabetically
-- **SseFramer** (`sse_framer.go`) — Byte-level SSE frame parser + Bedrock EventStream binary framing (declared, not wired)
+- **SseFramer** (`sse_framer.go`) — Byte-level SSE frame parser + Bedrock EventStream binary framing (excluded from build via `//go:build never`; reserved for raw-TCP proxy scenarios)
 - **Multi-Key Rotation** — Auto-rotate API keys on 401/403; configured via `OPENAI_API_KEYS`
 - **Rate Limiter** (`ratelimit.go`) — Token bucket limiter per RPM/TPM; blocks before request
 - **Context Threshold** — `Telemetry` compares prompt tokens against `ModelContextWindow`; emits `ChunkWarn` / `Response.Warning` at configurable % thresholds (warn/compress)
 - **Configurable Timeout** — `StreamTimeout` replaces hardcoded 120s idle timeout
+- **sync.Pool** — `buildBody()` reuses pooled `map[string]any` to cut GC churn
+- **HTTP Transport Tuning** — Shared cloned transport: MaxIdleConns=100, MaxIdleConnsPerHost=20, MaxConnsPerHost=50, IdleConnTimeout=120s
+- **Circuit Breaker** — Per-vendor `CircuitBreaker` (Closed/Open/HalfOpen); `SendWithRetry` records failures; auto-reset after timeout
+- **RetryNotify** — Context-injected callback fires before each retry; upper layers can surface retry status
+- **StreamInterruptedError** — Typed error wraps stream failures after tokens already emitted; upper layer can trigger recovery instead of hard fail
+- **Stream Auto-Recovery** — `chatModel.Stream` detects `StreamInterruptedError`, sends recovery notice, and falls back to `forwardChat` to complete the response
+- **Tool Sanitization** — `sanitizeTool()` assigns fallback name/description when empty, preventing API 400 errors
+- **Vision/Compress Shared Transport** — Both tools reuse `protocol.DefaultTransport` instead of creating per-call `http.Client`
 
 ---
 
@@ -55,8 +63,8 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 git clone <repo> MiniGoAgent
 cd MiniGoAgent
 
-# Install eino dependency (vendored)
-replace github.com/cloudwego/eino => ../eino
+# Clone eino to sibling directory (required: go.mod uses replace directive)
+git clone https://github.com/cloudwego/eino.git reference/eino
 
 # Configure
 set OPENAI_API_KEY=your_key
@@ -99,6 +107,8 @@ docker run -p 8080:8080 \
 | `RATE_LIMIT_TPM` | `0` | Max tokens per minute (0=off) |
 | `CONTEXT_WARN_PCT` | `40` | Context warning threshold (%) |
 | `CONTEXT_COMPRESS_PCT` | `50` | Context compression signal (%) |
+| `AGENT_MAX_STEP` | `12` | Max ReAct agent loop steps |
+| `MAX_RECONNECT_ATTEMPTS` | `3` | SSE stream reconnect attempts |
 
 ---
 
@@ -120,15 +130,18 @@ docker run -p 8080:8080 \
 │   ├── content_compress.go  # Per-type content compression strategy
 │   ├── sse_framer.go        # Byte-level SSE + Bedrock EventStream framing (declared, not wired)
 │   ├── ratelimit.go         # Token bucket rate limiter (RPM/TPM)
-│   ├── protocol_test.go     # Unit + mock tests (22 tests)
+│   ├── protocol_test.go           # Unit + mock tests (22 tests)
 │   └── openai_integration_test.go # Integration tests (9 tests)
+├── main_test.go             # Helper function + history DTO tests (7 tests)
 ├── tools/                   # Tool implementations
 │   ├── terminal.go          # Shell command execution
 │   ├── websearch.go         # Web search
 │   ├── compress.go          # Text compression
 │   ├── fileops.go           # Read/Write/Edit/Glob/Grep
+│   ├── fileops_test.go      # File operation tests (3 tests)
 │   ├── vision.go            # Image analysis
 │   ├── cache.go             # Terminal command result cache
+│   ├── cache_test.go        # Cache logic tests (1 test)
 │   ├── filter/              # Output filter framework
 │   ├── log/                 # Logging package
 │   └── sessionlog/          # Per-session .md logging
@@ -142,8 +155,8 @@ docker run -p 8080:8080 \
 ## Testing
 
 ```bash
-# Unit tests (no network, 22 tests)
-go test ./protocol/ -v
+# Unit tests (no network)
+go test ./... -v
 
 # Integration tests (requires API key)
 go test -tags=integration -run "TestOpenAIChat" ./protocol/ -v
@@ -166,7 +179,8 @@ react.Agent (eino)
     │   ├── Terminal (filtered, cached)
     │   ├── Web Search
     │   ├── File Operations
-    │   └── Compress
+    │   ├── Compress
+    │   └── Vision
     │
     └── chatModel (adapter · telemetry delegation)
             │
@@ -212,8 +226,8 @@ go vet ./...
 
 - **Web UI** — SSE 流式输出，Markdown 渲染，粘贴图片
 - **多会话** — `?session=<id>` 隔离对话历史，互不干扰
-- **Agent 循环** — ReAct 架构，最多 12 步，工具调用自动修复
-- **8 个工具** — 终端、搜索、压缩、读写文件、编辑文件、Glob、Grep
+- **Agent 循环** — ReAct 架构（`AGENT_MAX_STEP` 可配置，默认 12 步），工具调用自动修复
+- **9 个工具** — 终端、搜索、压缩、读写文件、编辑文件、Glob、Grep、图片分析
 - **输出过滤** — RTK 风格，按命令前缀匹配不同过滤器，语义安全保底
 - **结果缓存** — 只读终端命令 30s TTL 缓存
 - **历史持久化** — Ctrl+C 自动保存，启动时恢复
@@ -227,7 +241,7 @@ go vet ./...
 - **供应商检测** — 自动识别 DeepSeek/Zhipu/MiniMax/LongCat/Ollama/MiMo
 - **推理内容** — 运行时自动检测 `reasoning_content`，发送 `ChunkReasoning` 事件
 - **HTTP 重试** — 指数退避 + 抖动，最多 10 次，支持 `Retry-After`
-- **流断线重连** — 未输出 token 前自动重连 3 次
+- **流断线重连** — 未输出 token 前自动重连（`MAX_RECONNECT_ATTEMPTS` 可配置，默认 3 次）
 - **工具调用修复** — 截断 JSON 修复、孤儿 tool 消息丢弃、缺失 result 补填、空缺名回填
 - **Think 标签解析** — MiniMax `&lt;think&gt;` 内联推理解析器
 - **Schema 标准化** — 确保工具定义符合 JSON Schema 规范
@@ -236,11 +250,19 @@ go vet ./...
 - **Live Zone** — 只压缩最后一条 user 消息之后的内容，frozen 历史不动
 - **Telemetry 统计** — `Telemetry.Record()` 记录每次调用的耗时/供应商/模型/token；`FormatLine()`/`FormatMap()` 供上层使用
 - **工具/Schema 排序** — `toWireTools()` 按 name 排序工具；`sortSchemaKeys()` 递归排序 JSON key
-- **SseFramer** (`sse_framer.go`) — 字节级 SSE 帧解析 + Bedrock EventStream 二进制帧（声明未接入）
+- **SseFramer** (`sse_framer.go`) — 字节级 SSE 帧解析 + Bedrock EventStream 二进制帧（`//go:build never` 排除编译，留待 raw TCP 代理场景）
 - **多 Key 轮转** — 401/403 自动换 key 重试，配置 `OPENAI_API_KEYS`
 - **Rate Limiter** (`ratelimit.go`) — Token bucket 限流（RPM/TPM），请求前阻塞等待
 - **上下文阈值** — `Telemetry` 对比 prompt tokens 与 model context window；超过阈值发出 `ChunkWarn` / `Response.Warning`
 - **可配置超时** — `StreamTimeout` 替代硬编码 120s idle timeout
+- **sync.Pool 复用** — `buildBody()` 复用 `map[string]any`，降低 GC 压力
+- **HTTP 连接池调优** — 共享 Transport，MaxIdleConns=100，MaxIdleConnsPerHost=20，MaxConnsPerHost=50，KeepAlive 120s
+- **断路器（Circuit Breaker）** — 按 vendor 独立状态机（Closed/Open/HalfOpen）；`SendWithRetry` 记录失败；超时后自动恢复
+- **RetryNotify** — context 注入重试回调，上层可展示重试状态
+- **StreamInterruptedError** — 已 emit 后断线包装为独立 error 类型，上层可识别并恢复
+- **流中断自动恢复** — `chatModel.Stream` 检测到 `StreamInterruptedError` 后发恢复提示，用 `forwardChat` 补全响应
+- **工具参数兜底** — `sanitizeTool()` 为空 name/description 自动赋 fallback，避免 API 400
+- **Vision/Compress 共享 Transport** — 两个工具均复用 `protocol.DefaultTransport`，不再各自创建 `http.Client`
 
 ---
 
@@ -254,6 +276,9 @@ go vet ./...
 ### 配置运行
 
 ```bash
+# 克隆 eino 到同级目录（go.mod 使用了 replace 指令）
+git clone https://github.com/cloudwego/eino.git reference/eino
+
 set OPENAI_API_KEY=your_key
 set OPENAI_BASE_URL=https://token.sensenova.cn/v1
 set OPENAI_MODEL=deepseek-v4-flash
@@ -282,6 +307,8 @@ go run .
 | `RATE_LIMIT_TPM` | `0` | 每分钟 token 限制（0=关闭） |
 | `CONTEXT_WARN_PCT` | `40` | 上下文预警阈值（%） |
 | `CONTEXT_COMPRESS_PCT` | `50` | 上下文压缩触发阈值（%） |
+| `AGENT_MAX_STEP` | `12` | Agent 最大循环步数 |
+| `MAX_RECONNECT_ATTEMPTS` | `3` | SSE 流重连次数 |
 
 ---
 
@@ -303,9 +330,20 @@ go run .
 │   ├── content_compress.go  # 按类型压缩策略
 │   ├── sse_framer.go        # SSE + Bedrock EventStream 帧解析（声明未接入）
 │   ├── ratelimit.go         # Token bucket 限流器（RPM/TPM）
-│   ├── protocol_test.go     # 单元 + Mock 测试（22 个）
+│   ├── protocol_test.go           # 单元 + Mock 测试（25 个）
 │   └── openai_integration_test.go # 集成测试（9 个）
+├── main_test.go             # 辅助函数 + 历史 DTO 测试（7 个）
 ├── tools/                   # 工具实现
+│   ├── terminal.go          # Shell 命令执行
+│   ├── websearch.go         # 联网搜索
+│   ├── compress.go          # 文本压缩
+│   ├── fileops.go           # 读写编辑文件/Glob/Grep
+│   ├── fileops_test.go      # 文件操作测试（3 个）
+│   ├── vision.go            # 图片分析
+│   ├── cache.go             # 终端命令缓存
+│   ├── cache_test.go        # 缓存逻辑测试（1 个）
+│   ├── filter/              # 输出过滤器
+│   ├── log/                 # 日志包
 │   └── sessionlog/          # 每会话 .md 日志
 ├── frontend/
 │   └── index.html           # Web 界面
@@ -318,7 +356,7 @@ go run .
 
 ```bash
 # 单元测试（无需网络）
-go test ./protocol/ -v
+go test ./... -v
 
 # 集成测试（需 API key）
 go test -tags=integration -run "TestOpenAIChat" ./protocol/ -v
@@ -341,7 +379,8 @@ react.Agent (eino)
     │   ├── 终端 (过滤 + 缓存)
     │   ├── 联网搜索
     │   ├── 文件操作
-    │   └── 文本压缩
+    │   ├── 文本压缩
+    │   └── 图片分析
     │
     └── chatModel (适配层)
             │

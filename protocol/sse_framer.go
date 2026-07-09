@@ -1,3 +1,5 @@
+//go:build never
+
 // NOT WIRED: SseFramer is a byte-level SSE frame parser designed for raw TCP
 // streams (transparent proxy / reverse proxy), where TCP segments can split
 // frames at any byte boundary. MiniGoAgent is an HTTP client — Go's net/http

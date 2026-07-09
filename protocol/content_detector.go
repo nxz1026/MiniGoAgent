@@ -25,7 +25,13 @@ var (
 	reANSIEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 )
 
+var defaultPredictor = NewContentPredictor(true)
+
 func DetectContentType(content string) ContentType {
+	return defaultPredictor.Predict(content)
+}
+
+func detectContentTypeHeuristic(content string) ContentType {
 	if strings.HasPrefix(strings.TrimSpace(content), "[") ||
 		strings.HasPrefix(strings.TrimSpace(content), "{") {
 		if !strings.Contains(content, "\n") {
@@ -56,7 +62,6 @@ func DetectContentType(content string) ContentType {
 	if matched > 3 {
 		return detectFromMatched(lines)
 	}
-	// try block-level detection
 	return detectFromContent(content)
 }
 

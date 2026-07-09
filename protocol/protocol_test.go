@@ -3,11 +3,13 @@ package protocol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -434,11 +436,22 @@ func TestMockDisconnectNoRetry(t *testing.T) {
 
 func TestMockChat(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sseHandler(w, r)
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		json.Unmarshal(body, &req)
+		if req.Stream {
+			sseHandler(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"Hello World"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
 	}))
 	defer srv.Close()
 
-	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	resp, err := p.Chat(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -447,6 +460,9 @@ func TestMockChat(t *testing.T) {
 	}
 	if resp.Content != "Hello World" {
 		t.Fatalf("expected 'Hello World', got %q", resp.Content)
+	}
+	if resp.Usage == nil || resp.Usage.PromptTokens != 10 {
+		t.Fatalf("expected usage with 10 prompt_tokens, got %+v", resp.Usage)
 	}
 }
 
@@ -507,13 +523,24 @@ func TestOpenAIFactory(t *testing.T) {
 
 func TestMockStreamError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		json.Unmarshal(body, &req)
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			fmt.Fprint(w, "data: {\"error\":{\"message\":\"rate limited\"}}\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
-		fmt.Fprint(w, "data: {\"error\":{\"message\":\"rate limited\"}}\n\n")
+		fmt.Fprint(w, `{"error":{"message":"rate limited"}}`)
 	}))
 	defer srv.Close()
 
-	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	_, err := p.Chat(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -522,14 +549,460 @@ func TestMockStreamError(t *testing.T) {
 	}
 }
 
-func TestTransientErr(t *testing.T) {
-	if !transientErr(io.EOF) {
-		t.Error("EOF should be transient")
+func TestCircuitBreaker_Closed(t *testing.T) {
+    cb := &CircuitBreaker{
+        failureThreshold: 5,
+        failureRate:      0.6,
+        options: CircuitBreakerOptions{Timeout: time.Minute},
+    }
+    
+    testErr := fmt.Errorf("test error")
+    
+    // 在closed状态下，<threshold次失败不会触发open
+    for i := 0; i < 4; i++ {
+        if !cb.Check(testErr) {
+            t.Fatalf("expected success in closed state, got failure")
+        }
+    }
+    
+    // 第5次失败将触发状态转换为open
+    if cb.Check(testErr) {
+        t.Fatalf("expected closed->open transition")
+    }
+}
+
+func TestCircuitBreaker_Open(t *testing.T) {
+    now := time.Now()
+    cb := &CircuitBreaker{
+        failureThreshold: 5,
+        failureRate:      0.6,
+        lastFailure:     now,
+        state:          Open,
+        options: CircuitBreakerOptions{Timeout: time.Minute},
+    }
+    
+    // open状态下，拒绝所有请求
+    for i := 0; i < 3; i++ {
+        if cb.Check(nil) {
+            t.Fatalf("expected rejection in open state")
+        }
+    }
+}
+
+func TestCircuitBreaker_HalfOpen(t *testing.T) {
+    now := time.Now()
+    cb := &CircuitBreaker{
+        failureThreshold: 5,
+        failureRate:      0.6,
+        lastFailure:     now.Add(-10 * time.Second), // 足够早
+        state:          HalfOpen,
+        options: CircuitBreakerOptions{Timeout: time.Minute, HalfOpenMaxCalls: 5},
+    }
+    
+    // half-open状态允许后续请求
+    if !cb.Check(nil) {
+        t.Fatalf("expected success in half-open state")
+    }
+}
+
+func TestStreamInterruptedError_Wrap(t *testing.T) {
+	inner := fmt.Errorf("connection reset")
+	e := &StreamInterruptedError{Emitted: true, Err: inner}
+	if e.Error() == "" {
+		t.Fatal("Error() returned empty")
 	}
-	if transientErr(context.Canceled) {
-		t.Error("Canceled should NOT be transient")
+	if !strings.Contains(e.Error(), "stream interrupted") {
+		t.Fatalf("expected 'stream interrupted' in error, got %q", e.Error())
 	}
-	if transientErr(nil) {
-		t.Error("nil should NOT be transient")
+	if !strings.Contains(e.Error(), "connection reset") {
+		t.Fatalf("expected 'connection reset' in error, got %q", e.Error())
+	}
+	if !errors.Is(e, inner) {
+		t.Error("errors.Is should unwrap to inner error")
+	}
+	var se *StreamInterruptedError
+	if !errors.As(e, &se) {
+		t.Error("errors.As should find StreamInterruptedError in chain")
 	}
 }
+
+func TestStreamInterruptedError_MockStreamEmitThenDisconnect(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"part\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var result string
+	for chunk := range ch {
+		if chunk.Type == ChunkText {
+			result += chunk.Text
+		}
+	}
+	if result != "part" {
+		t.Fatalf("expected 'part', got %q", result)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 call (no retry after emit), got %d", callCount)
+	}
+}
+
+func TestStreamInterruptedError_MockStreamEmitThenAPIError(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"part\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"error\":{\"message\":\"server stopped\"}}\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var result string
+	var chunkErr error
+	for chunk := range ch {
+		if chunk.Type == ChunkText {
+			result += chunk.Text
+		}
+		if chunk.Type == ChunkError && chunk.Error != nil {
+			chunkErr = chunk.Error
+		}
+	}
+	if result != "part" {
+		t.Fatalf("expected 'part', got %q", result)
+	}
+	if chunkErr == nil {
+		t.Fatal("expected a chunk error after API error, got nil")
+	}
+	var se *StreamInterruptedError
+	if !errors.As(chunkErr, &se) {
+		t.Fatalf("expected StreamInterruptedError, got %T: %v", chunkErr, chunkErr)
+	}
+	if !se.Emitted {
+		t.Fatal("StreamInterruptedError.Emitted should be true")
+	}
+}
+
+func TestSanitizeTool(t *testing.T) {
+	tests := []struct {
+		input    ToolSchema
+		name     string
+		desc     string
+	}{
+		{ToolSchema{Name: "", Description: ""}, "unnamed_tool", "user-defined tool"},
+		{ToolSchema{Name: "  ", Description: ""}, "unnamed_tool", "user-defined tool"},
+		{ToolSchema{Name: "search", Description: ""}, "search", "user-defined tool"},
+		{ToolSchema{Name: "", Description: "  desc  "}, "unnamed_tool", "  desc  "},
+		{ToolSchema{Name: "calc", Description: "computes"}, "calc", "computes"},
+	}
+	for _, tt := range tests {
+		got := sanitizeTool(tt.input)
+		if got.Name != tt.name {
+			t.Errorf("sanitizeTool name: got %q, want %q", got.Name, tt.name)
+		}
+		if got.Description != tt.desc {
+			t.Errorf("sanitizeTool desc: got %q, want %q", got.Description, tt.desc)
+		}
+	}
+}
+
+func TestRetryNotifyContext(t *testing.T) {
+	var notifyCalls []struct {
+		attempt int
+		max     int
+	}
+	notifyFn := func(attempt, max int) {
+		notifyCalls = append(notifyCalls, struct{ attempt int; max int }{attempt, max})
+	}
+	ctx := context.WithValue(context.Background(), CtxRetryNotify, notifyFn)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		io.WriteString(w, `{"error":{"message":"unavailable"}}`)
+	}))
+	defer srv.Close()
+
+	_, _ = SendWithRetry(ctx, NewHTTPClient(5*time.Second), VendorUnspecified,
+		func(ctx context.Context) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		})
+	if len(notifyCalls) == 0 {
+		t.Fatal("expected RetryNotify to be called at least once")
+	}
+	for _, call := range notifyCalls {
+		if call.attempt < 1 || call.max != MaxRetries {
+			t.Fatalf("unexpected notify call: attempt=%d max=%d", call.attempt, call.max)
+		}
+	}
+}
+
+func TestSendWithRetry_CircuitBreakerIntegration(t *testing.T) {
+	cb := &CircuitBreaker{
+		failureThreshold: 3,
+		failureRate:      1.0,
+		options:          CircuitBreakerOptions{Timeout: 5 * time.Minute},
+	}
+	vendorCircuitBreaker[VendorUnspecified] = cb
+	defer delete(vendorCircuitBreaker, VendorUnspecified)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		io.WriteString(w, `{"error":{"message":"unavailable"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := SendWithRetry(context.Background(), NewHTTPClient(5*time.Second), VendorUnspecified,
+		func(ctx context.Context) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		})
+	if err == nil {
+		t.Fatal("expected error after retries exhausted")
+	}
+	if cb.state != Open {
+		t.Fatalf("expected circuit breaker Open after failures, got state=%v", cb.state)
+	}
+}
+
+func TestSendWithRetry_CircuitBreakerAuthSuccess(t *testing.T) {
+	cb := &CircuitBreaker{
+		failureThreshold: 3,
+		failureRate:      1.0,
+		state:           HalfOpen,
+		options:          CircuitBreakerOptions{Timeout: 5 * time.Minute},
+	}
+	vendorCircuitBreaker[VendorUnspecified] = cb
+	defer delete(vendorCircuitBreaker, VendorUnspecified)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		io.WriteString(w, `{"error":{"message":"unauthorized"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := SendWithRetry(context.Background(), NewHTTPClient(5*time.Second), VendorUnspecified,
+		func(ctx context.Context) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		})
+	if err == nil {
+		t.Fatal("expected AuthError")
+	}
+	if cb.state != Closed {
+		t.Fatalf("expected circuit breaker Closed after auth success reset, got state=%v", cb.state)
+	}
+}
+
+func TestBodyPoolReuse(t *testing.T) {
+	o := NewOpenAI(Config{APIKey: "k", BaseURL: "http://example.com/v1", Model: "m"})
+	req := Request{Messages: []Message{{Role: RoleUser, Content: "hello"}}}
+	first := o.buildBody(req, false)
+	second := o.buildBody(req, false)
+	if string(first) != string(second) {
+		t.Fatalf("expected identical bodies from pool, got %s vs %s", first, second)
+	}
+}
+
+func TestDefaultTransportParams(t *testing.T) {
+	transport := DefaultTransport
+	if transport == nil {
+		t.Fatal("DefaultTransport is nil")
+	}
+	if transport.MaxIdleConns != 100 {
+		t.Fatalf("MaxIdleConns=%d, want 100", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 20 {
+		t.Fatalf("MaxIdleConnsPerHost=%d, want 20", transport.MaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost != 50 {
+		t.Fatalf("MaxConnsPerHost=%d, want 50", transport.MaxConnsPerHost)
+	}
+	if transport.IdleConnTimeout != 120*time.Second {
+		t.Fatalf("IdleConnTimeout=%v, want 120s", transport.IdleConnTimeout)
+	}
+}
+
+func TestEventBus_SubscribePublish(t *testing.T) {
+	eb := NewEventBus(context.Background(), 16)
+	var got []Chunk
+	var mu sync.Mutex
+	processed := make(chan struct{}, 2)
+	eb.Subscribe("s1", &testProcessor{chunks: &got, mu: &mu, done: processed})
+	_ = eb.Publish(context.Background(), Chunk{Type: ChunkText, Text: "hello"})
+	_ = eb.Publish(context.Background(), Chunk{Type: ChunkDone})
+	eb.Stop()
+	<-processed
+	if len(got) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(got))
+	}
+	if got[0].Text != "hello" {
+		t.Fatalf("expected hello, got %s", got[0].Text)
+	}
+}
+
+func TestEventBus_MultipleSubscribers(t *testing.T) {
+	eb := NewEventBus(context.Background(), 16)
+	var s1, s2 []Chunk
+	var mu1, mu2 sync.Mutex
+	processed := make(chan struct{}, 2)
+	eb.Subscribe("s1", &testProcessor{chunks: &s1, mu: &mu1, done: processed})
+	eb.Subscribe("s2", &testProcessor{chunks: &s2, mu: &mu2, done: processed})
+	_ = eb.Publish(context.Background(), Chunk{Type: ChunkText, Text: "broadcast"})
+	eb.Stop()
+	<-processed
+	if len(s1) != 1 || len(s2) != 1 {
+		t.Fatalf("expected both subscribers to receive 1 chunk, got s1=%d s2=%d", len(s1), len(s2))
+	}
+}
+
+type testProcessor struct {
+	chunks *[]Chunk
+	mu     *sync.Mutex
+	done   chan struct{}
+}
+
+func (p *testProcessor) Process(_ context.Context, chunk Chunk) error {
+	if p.chunks != nil && p.mu != nil {
+		p.mu.Lock()
+		*p.chunks = append(*p.chunks, chunk)
+		p.mu.Unlock()
+	}
+	if p.done != nil {
+		select {
+		case p.done <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (p *testProcessor) Name() string { return "test" }
+
+func TestContentPredictor_CacheHit(t *testing.T) {
+	p := NewContentPredictor(true)
+	ct := p.Predict("hello world")
+	ct2 := p.Predict("hello world")
+	if ct != ct2 {
+		t.Fatalf("expected same content type from cache, got %d vs %d", ct, ct2)
+	}
+}
+
+func TestContentPredictor_CacheMiss(t *testing.T) {
+	p := NewContentPredictor(true)
+	ct1 := p.Predict("[1, 2, 3]")
+	ct2 := p.Predict("diff --git a/foo b/foo")
+	if ct1 == ct2 {
+		t.Fatalf("expected different content types for different inputs, got %d vs %d", ct1, ct2)
+	}
+}
+
+func TestHealthChecker_Healthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	checker := NewHealthChecker(VendorUnspecified, srv.URL, 30*time.Second, cb)
+	checker.check(context.Background())
+
+	checker.mu.RLock()
+	status := checker.status
+	checker.mu.RUnlock()
+	if status != HealthHealthy {
+		t.Fatalf("expected HealthHealthy, got %v", status)
+	}
+}
+
+func TestHealthChecker_Unhealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	checker := NewHealthChecker(VendorUnspecified, srv.URL, 30*time.Second, cb)
+	checker.check(context.Background())
+
+	checker.mu.RLock()
+	status := checker.status
+	checker.mu.RUnlock()
+	if status != HealthUnhealthy {
+		t.Fatalf("expected HealthUnhealthy, got %v", status)
+	}
+}
+
+func TestHealthManager_RegisterGetStatus(t *testing.T) {
+	hm := NewHealthManager(context.Background())
+	defer hm.Stop()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	hm.Register(VendorUnspecified, srv.URL, 30*time.Second, cb)
+
+	status := hm.GetStatus(VendorUnspecified)
+	if status != HealthHealthy && status != HealthUnknown {
+		t.Fatalf("expected HealthHealthy or HealthUnknown, got %v", status)
+	}
+}
+
+func TestSendWithRetry_HealthShortCircuit(t *testing.T) {
+	hm := NewHealthManager(context.Background())
+	defer hm.Stop()
+
+	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, state: HalfOpen, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	vendorHealthManager = hm
+	vendorCircuitBreaker[VendorUnspecified] = cb
+	defer func() {
+		vendorHealthManager = NewHealthManager(context.Background())
+		delete(vendorCircuitBreaker, VendorUnspecified)
+	}()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer srv.Close()
+
+	// First make it unhealthy
+	checker := NewHealthChecker(VendorUnspecified, srv.URL, 30*time.Second, cb)
+	checker.check(context.Background())
+	checker.mu.Lock()
+	checker.status = HealthCircuitOpen
+	checker.mu.Unlock()
+
+	_, err := SendWithRetry(context.Background(), NewHTTPClient(5*time.Second), VendorUnspecified,
+		func(ctx context.Context) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+		})
+	if err == nil || !strings.Contains(err.Error(), "unhealthy") {
+		t.Fatalf("expected unhealthy error, got %v", err)
+	}
+}
+

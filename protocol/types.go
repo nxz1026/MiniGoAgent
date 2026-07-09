@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -82,7 +83,7 @@ type Chunk struct {
 	ToolCall *ToolCall
 	Usage    *Usage
 	Warning  string
-	Error    string
+	Error    error
 }
 
 type Protocol interface {
@@ -100,13 +101,150 @@ type Config struct {
 	RateLimitTPM     int
 	ContextWarnPct   int
 	ContextCompressPct int
+	MaxReconnect     int
+	HealthCheckURL   string
 }
 
 type contextKey string
 
-const CtxLogf contextKey = "protocol_logf"
+const (
+	CtxLogf      contextKey = "protocol_logf"
+	CtxRetryNotify contextKey = "protocol_retry_notify"
+)
 
 type Factory func(Config) (Protocol, error)
+
+const MaxRetries = 10
+const maxBackoff = 15 * time.Second
+
+type AuthError struct {
+	Vendor   Vendor
+	Status   int
+	HasKey   bool
+}
+
+func (e *AuthError) Error() string {
+	return fmt.Sprintf("auth error (vendor=%d, status=%d, has_key=%v)", e.Vendor, e.Status, e.HasKey)
+}
+
+type APIError struct {
+	Vendor Vendor
+	Status int
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("api error (vendor=%d, status=%d)", e.Vendor, e.Status)
+	}
+	return fmt.Sprintf("api error (vendor=%d, status=%d): %s", e.Vendor, e.Status, e.Body)
+}
+
+type StreamInterruptedError struct {
+	Emitted bool
+	Err     error
+}
+
+func (e *StreamInterruptedError) Error() string {
+	return fmt.Sprintf("stream interrupted (emitted=%v): %v", e.Emitted, e.Err)
+}
+
+func (e *StreamInterruptedError) Unwrap() error {
+	return e.Err
+}
+
+type CircuitBreakerState int
+
+const (
+    Closed CircuitBreakerState = iota
+    Open
+    HalfOpen
+)
+
+type CircuitBreakerOptions struct {
+    Timeout          time.Duration
+    HalfOpenMaxCalls int
+    CheckHTTPCodes   []int
+    CheckErrors      []error
+}
+
+type CircuitBreaker struct {
+    failureThreshold int
+    failureRate     float64
+    lastFailure     time.Time
+    state          CircuitBreakerState
+    options        CircuitBreakerOptions
+    mutex          sync.RWMutex
+    keyMu          sync.Mutex
+}
+
+func (cb *CircuitBreaker) isFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, e := range cb.options.CheckErrors {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	if len(cb.options.CheckHTTPCodes) > 0 {
+		var ae *AuthError
+		if errors.As(err, &ae) {
+			for _, code := range cb.options.CheckHTTPCodes {
+				if ae.Status == code {
+					return true
+				}
+			}
+		}
+	}
+	return true
+}
+
+func (cb *CircuitBreaker) Check(err error) bool {
+	cb.mutex.RLock()
+	defer cb.mutex.RUnlock()
+
+	if cb.state == Closed {
+		if err != nil && cb.isFailure(err) {
+			cb.failureThreshold--
+			if cb.failureThreshold <= 0 {
+				cb.state = Open
+				cb.lastFailure = time.Now()
+				return false
+			}
+		}
+		return true
+	}
+
+	if cb.state == Open {
+		if time.Since(cb.lastFailure) >= cb.options.Timeout {
+			cb.state = HalfOpen
+			return true
+		}
+		return false
+	}
+
+	if cb.state == HalfOpen {
+		if err != nil && cb.isFailure(err) {
+			cb.state = Open
+			cb.lastFailure = time.Now()
+			return false
+		}
+		return true
+	}
+
+	return true
+}
+
+func (cb *CircuitBreaker) Success() {
+	cb.mutex.Lock()
+	defer cb.mutex.Unlock()
+
+	if cb.state == HalfOpen {
+		cb.failureThreshold = 5
+		cb.state = Closed
+	}
+}
 
 var (
 	registry   = map[string]Factory{}

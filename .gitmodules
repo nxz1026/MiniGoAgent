@@ -1,0 +1,9 @@
+[submodule "reference/opencode"]
+	path = reference/opencode
+	url = https://github.com/anomalyco/opencode.git
+[submodule "reference/eino"]
+	path = reference/eino
+	url = https://github.com/nxz1026/eino.git
+[submodule "reference/hermes-agent"]
+	path = reference/hermes-agent
+	url = https://github.com/NousResearch/hermes-agent.git

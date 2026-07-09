@@ -77,7 +77,9 @@ func TestOpenAIStream(t *testing.T) {
 		case ChunkDone:
 			t.Log("DONE")
 		case ChunkError:
-			t.Errorf("STREAM ERROR: %s", chunk.Error)
+			if chunk.Error != nil {
+				t.Errorf("STREAM ERROR: %v", chunk.Error)
+			}
 		}
 	}
 	if full.Len() == 0 && toolCalls == 0 {
