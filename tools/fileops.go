@@ -117,6 +117,11 @@ func GrepFiles(ctx context.Context, input GrepInput) (string, error) {
 	}
 	var results []string
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err != nil || info.IsDir() {
 			return nil
 		}

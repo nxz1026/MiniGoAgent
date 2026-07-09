@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 type Role string
@@ -92,14 +93,21 @@ type Config struct {
 
 type Factory func(Config) (Protocol, error)
 
-var registry = map[string]Factory{}
+var (
+	registry   = map[string]Factory{}
+	registryMu sync.RWMutex
+)
 
 func Register(kind string, f Factory) {
+	registryMu.Lock()
 	registry[kind] = f
+	registryMu.Unlock()
 }
 
 func New(kind string, cfg Config) (Protocol, error) {
+	registryMu.RLock()
 	f, ok := registry[kind]
+	registryMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown provider kind: %s", kind)
 	}

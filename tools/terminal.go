@@ -58,8 +58,7 @@ func isAccessDenied(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "access is denied") ||
 		strings.Contains(msg, "拒绝访问") ||
-		strings.Contains(msg, "permission denied") ||
-		strings.Contains(msg, "系统找不到")
+		strings.Contains(msg, "permission denied")
 }
 
 func isAdmin() bool {

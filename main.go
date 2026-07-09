@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -257,7 +258,12 @@ func (s *chatServer) serveFrontend(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	data, _ := frontendFS.ReadFile("frontend/index.html")
+	data, err := frontendFS.ReadFile("frontend/index.html")
+	if err != nil {
+		log.Error("读取前端文件失败: %v", err)
+		http.Error(w, "internal error", 500)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(data)
 }
@@ -463,52 +469,23 @@ func (s *chatServer) loadHistory() {
 var imgExts = []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 func extractLocalImagePath(input string) string {
-	rr := []rune(input)
-	lowerRR := []rune(strings.ToLower(input))
-	for _, ext := range imgExts {
-		extR := []rune(ext)
-		idx := lastIndexRune(lowerRR, extR)
-		if idx < 0 {
-			continue
-		}
-		for i := idx; i >= 0; i-- {
-			if i+1 < len(rr) && rr[i+1] == ':' && i >= 0 {
-				candidate := string(rr[i : idx+len(extR)])
-				if _, err := os.Stat(candidate); err == nil {
-					return candidate
-				}
-			}
-			if rr[i] == '\\' || rr[i] == '/' {
-				candidate := string(rr[i : idx+len(extR)])
-				if _, err := os.Stat(candidate); err == nil {
-					return candidate
-				}
-				if i >= 2 && rr[i-1] == ':' {
-					candidate2 := string(rr[i-2 : idx+len(extR)])
-					if _, err := os.Stat(candidate2); err == nil {
-						return candidate2
-					}
-				}
+	trimmed := strings.TrimSpace(input)
+	if idx := strings.LastIndexAny(trimmed, " \t\n\r"); idx >= 0 {
+		trimmed = trimmed[idx+1:]
+		trimmed = strings.TrimSpace(trimmed)
+	}
+	if trimmed == "" {
+		return ""
+	}
+	ext := strings.ToLower(filepath.Ext(trimmed))
+	for _, e := range imgExts {
+		if ext == e {
+			if _, err := os.Stat(trimmed); err == nil {
+				return trimmed
 			}
 		}
 	}
 	return ""
-}
-
-func lastIndexRune(s, sub []rune) int {
-	for i := len(s) - len(sub); i >= 0; i-- {
-		match := true
-		for j := range sub {
-			if s[i+j] != sub[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
 }
 
 func loadEnv() {
@@ -516,7 +493,8 @@ func loadEnv() {
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	text := strings.ReplaceAll(string(data), "\r", "")
+	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

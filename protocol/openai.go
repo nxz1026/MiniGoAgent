@@ -166,39 +166,7 @@ func (o *OpenAI) buildBody(req Request) []byte {
 	if len(req.Stop) > 0 {
 		m["stop"] = req.Stop
 	}
-	switch o.policy {
-	case reasoningThinking:
-		switch o.vendor {
-		case VendorDeepSeek:
-			if o.thinkingType == "disabled" {
-				m["thinking"] = map[string]string{"type": "disabled"}
-			} else {
-				m["thinking"] = map[string]string{"type": "enabled"}
-			}
-		case VendorMiniMax:
-			t := o.effort
-			if t == "" {
-				t = "adaptive"
-			}
-			m["thinking"] = map[string]string{"type": t}
-		case VendorZhipu:
-			t := o.effort
-			if t == "" {
-				t = "enabled"
-			}
-			m["thinking"] = map[string]string{"type": t}
-		case VendorLongCat:
-			t := o.thinkingType
-			if t == "" {
-				t = "enabled"
-			}
-			m["thinking"] = map[string]string{"type": t}
-		}
-	case reasoningEffort:
-		if o.effort != "" {
-			m["reasoning_effort"] = o.effort
-		}
-	}
+	o.buildThinkingFields(m)
 	body, _ := json.Marshal(m)
 	return body
 }
@@ -243,6 +211,43 @@ func (o *OpenAI) toWireTools(tools []ToolSchema) []map[string]any {
 		}
 	}
 	return out
+}
+
+func (o *OpenAI) buildThinkingFields(m map[string]any) {
+	switch o.policy {
+	case reasoningThinking:
+		var t string
+		switch o.vendor {
+		case VendorDeepSeek:
+			if o.thinkingType == "disabled" {
+				m["thinking"] = map[string]string{"type": "disabled"}
+				return
+			}
+			m["thinking"] = map[string]string{"type": "enabled"}
+		case VendorMiniMax:
+			t = o.effort
+			if t == "" {
+				t = "adaptive"
+			}
+			m["thinking"] = map[string]string{"type": t}
+		case VendorZhipu:
+			t = o.effort
+			if t == "" {
+				t = "enabled"
+			}
+			m["thinking"] = map[string]string{"type": t}
+		case VendorLongCat:
+			t = o.thinkingType
+			if t == "" {
+				t = "enabled"
+			}
+			m["thinking"] = map[string]string{"type": t}
+		}
+	case reasoningEffort:
+		if o.effort != "" {
+			m["reasoning_effort"] = o.effort
+		}
+	}
 }
 
 func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<- Chunk) (emitted bool, _ error) {

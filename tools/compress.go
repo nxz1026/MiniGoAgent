@@ -30,11 +30,9 @@ func RunCompress(ctx context.Context, input CompressInput) (string, error) {
 
 	prompt := input.Instruction
 	if prompt == "" {
-		prompt = "请压缩以下内容，保留所有关键信息，去除冗余，语言保持不变：\n\n"
+		prompt = "请压缩以下内容，保留所有关键信息，去除冗余，语言保持不变"
 	}
-	if !strings.Contains(prompt, input.Content) {
-		prompt += "\n\n" + input.Content
-	}
+	prompt += "\n\n" + input.Content
 
 	apiURL := strings.TrimRight(baseURL, "/") + "/chat/completions"
 
