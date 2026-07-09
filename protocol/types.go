@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 )
 
 type Role string
@@ -53,6 +54,7 @@ type Response struct {
 	ReasoningContent string
 	ToolCalls        []ToolCall
 	Usage            *Usage
+	Warning          string
 }
 
 type ChunkType int
@@ -63,6 +65,7 @@ const (
 	ChunkToolCallStart
 	ChunkToolCall
 	ChunkUsage
+	ChunkWarn
 	ChunkDone
 	ChunkError
 )
@@ -78,6 +81,7 @@ type Chunk struct {
 	Text     string
 	ToolCall *ToolCall
 	Usage    *Usage
+	Warning  string
 	Error    string
 }
 
@@ -87,9 +91,15 @@ type Protocol interface {
 }
 
 type Config struct {
-	APIKey  string
-	BaseURL string
-	Model   string
+	APIKey           string
+	APIKeys          []string
+	BaseURL          string
+	Model            string
+	StreamTimeout    time.Duration
+	RateLimitRPM     int
+	RateLimitTPM     int
+	ContextWarnPct   int
+	ContextCompressPct int
 }
 
 type contextKey string

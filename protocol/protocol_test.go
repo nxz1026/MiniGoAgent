@@ -288,7 +288,7 @@ func TestMockStream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI("test-key", srv.URL, "test-model")
+	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -313,7 +313,7 @@ func TestMockStreamReasoning(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI("test-key", srv.URL, "test-model")
+	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "think step by step"}},
 	})
@@ -344,7 +344,7 @@ func TestMockStreamToolCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI("test-key", srv.URL, "test-model")
+	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "weather"}},
 	})
@@ -374,7 +374,7 @@ func TestMockStreamReconnect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI("test-key", srv.URL, "test-model")
+	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -410,7 +410,7 @@ func TestMockDisconnectNoRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI("test-key", srv.URL, "test-model")
+	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -438,7 +438,7 @@ func TestMockChat(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI("test-key", srv.URL, "test-model")
+	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	resp, err := p.Chat(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -513,7 +513,7 @@ func TestMockStreamError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI("test-key", srv.URL, "test-model")
+	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	_, err := p.Chat(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})

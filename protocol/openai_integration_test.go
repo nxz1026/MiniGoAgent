@@ -17,7 +17,7 @@ func chatModel(t *testing.T) Protocol {
 	if apiKey == "" || baseURL == "" {
 		t.Skip("SKIP: 需要设置 OPENAI_API_KEY 和 OPENAI_BASE_URL")
 	}
-	return NewOpenAI(apiKey, baseURL, getEnv("OPENAI_MODEL", "deepseek-v4-flash"))
+	return NewOpenAI(Config{APIKey: apiKey, BaseURL: baseURL, Model: getEnv("OPENAI_MODEL", "deepseek-v4-flash")})
 }
 
 func getEnv(key, fallback string) string {
@@ -125,7 +125,7 @@ func TestOpenAITools(t *testing.T) {
 }
 
 func TestOpenAIBadAuth(t *testing.T) {
-	p := NewOpenAI("bad-key", os.Getenv("OPENAI_BASE_URL"), "gpt-4")
+	p := NewOpenAI(Config{APIKey: "bad-key", BaseURL: os.Getenv("OPENAI_BASE_URL"), Model: "gpt-4"})
 	req := Request{
 		Messages: []Message{
 			{Role: RoleUser, Content: "hi"},
@@ -144,7 +144,7 @@ func TestOpenAIBadModel(t *testing.T) {
 	if apiKey == "" || baseURL == "" {
 		t.Skip("SKIP: 需要设置 OPENAI_API_KEY 和 OPENAI_BASE_URL")
 	}
-	p := NewOpenAI(apiKey, baseURL, "nonexistent-model-xyz")
+	p := NewOpenAI(Config{APIKey: apiKey, BaseURL: baseURL, Model: "nonexistent-model-xyz"})
 	req := Request{
 		Messages: []Message{
 			{Role: RoleUser, Content: "hi"},
@@ -169,7 +169,7 @@ func TestOpenAIVendorDetection(t *testing.T) {
 		{"https://api.openai.com/v1", VendorUnspecified},
 	}
 	for _, tt := range tests {
-		p := NewOpenAI("test-key", tt.baseURL, "test-model")
+		p := NewOpenAI(Config{APIKey: "test-key", BaseURL: tt.baseURL, Model: "test-model"})
 		if p.vendor != tt.vendor {
 			t.Errorf("NewOpenAI(%q).vendor = %d, want %d", tt.baseURL, p.vendor, tt.vendor)
 		}

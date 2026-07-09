@@ -34,6 +34,10 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 - **Vendor.String()** — Vendor enum now has string representation for telemetry output
 - **Tool/Schema Sorting** — `toWireTools()` sorts tools by name; `sortSchemaKeys()` recursively sorts JSON keys alphabetically
 - **SseFramer** (`sse_framer.go`) — Byte-level SSE frame parser + Bedrock EventStream binary framing (declared, not wired)
+- **Multi-Key Rotation** — Auto-rotate API keys on 401/403; configured via `OPENAI_API_KEYS`
+- **Rate Limiter** (`ratelimit.go`) — Token bucket limiter per RPM/TPM; blocks before request
+- **Context Threshold** — `Telemetry` compares prompt tokens against `ModelContextWindow`; emits `ChunkWarn` / `Response.Warning` at configurable % thresholds (warn/compress)
+- **Configurable Timeout** — `StreamTimeout` replaces hardcoded 120s idle timeout
 
 ---
 
@@ -89,6 +93,12 @@ docker run -p 8080:8080 \
 | `LOG_LEVEL` | `INFO` | Log level (DEBUG/INFO/WARN/ERROR) |
 | `LOG_DIR` | `logs` | Log directory |
 | `CACHE_TTL` | `30` | Tool result cache TTL (seconds) |
+| `OPENAI_API_KEYS` | — | Multi-key rotation (comma-separated) |
+| `STREAM_TIMEOUT` | `120s` | Stream idle timeout |
+| `RATE_LIMIT_RPM` | `0` | Max requests per minute (0=off) |
+| `RATE_LIMIT_TPM` | `0` | Max tokens per minute (0=off) |
+| `CONTEXT_WARN_PCT` | `40` | Context warning threshold (%) |
+| `CONTEXT_COMPRESS_PCT` | `50` | Context compression signal (%) |
 
 ---
 
@@ -109,6 +119,7 @@ docker run -p 8080:8080 \
 │   ├── content_detector.go  # Content type detection (5 types)
 │   ├── content_compress.go  # Per-type content compression strategy
 │   ├── sse_framer.go        # Byte-level SSE + Bedrock EventStream framing (declared, not wired)
+│   ├── ratelimit.go         # Token bucket rate limiter (RPM/TPM)
 │   ├── protocol_test.go     # Unit + mock tests (22 tests)
 │   └── openai_integration_test.go # Integration tests (9 tests)
 ├── tools/                   # Tool implementations
@@ -226,6 +237,10 @@ go vet ./...
 - **Telemetry 统计** — `Telemetry.Record()` 记录每次调用的耗时/供应商/模型/token；`FormatLine()`/`FormatMap()` 供上层使用
 - **工具/Schema 排序** — `toWireTools()` 按 name 排序工具；`sortSchemaKeys()` 递归排序 JSON key
 - **SseFramer** (`sse_framer.go`) — 字节级 SSE 帧解析 + Bedrock EventStream 二进制帧（声明未接入）
+- **多 Key 轮转** — 401/403 自动换 key 重试，配置 `OPENAI_API_KEYS`
+- **Rate Limiter** (`ratelimit.go`) — Token bucket 限流（RPM/TPM），请求前阻塞等待
+- **上下文阈值** — `Telemetry` 对比 prompt tokens 与 model context window；超过阈值发出 `ChunkWarn` / `Response.Warning`
+- **可配置超时** — `StreamTimeout` 替代硬编码 120s idle timeout
 
 ---
 
@@ -261,6 +276,12 @@ go run .
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `LOG_DIR` | `logs` | 日志目录 |
 | `CACHE_TTL` | `30` | 工具结果缓存 TTL（秒） |
+| `OPENAI_API_KEYS` | — | 多 key 轮转（逗号分隔） |
+| `STREAM_TIMEOUT` | `120s` | 流空闲超时 |
+| `RATE_LIMIT_RPM` | `0` | 每分钟请求限制（0=关闭） |
+| `RATE_LIMIT_TPM` | `0` | 每分钟 token 限制（0=关闭） |
+| `CONTEXT_WARN_PCT` | `40` | 上下文预警阈值（%） |
+| `CONTEXT_COMPRESS_PCT` | `50` | 上下文压缩触发阈值（%） |
 
 ---
 
@@ -281,6 +302,7 @@ go run .
 │   ├── content_detector.go  # 内容类型检测（5 种）
 │   ├── content_compress.go  # 按类型压缩策略
 │   ├── sse_framer.go        # SSE + Bedrock EventStream 帧解析（声明未接入）
+│   ├── ratelimit.go         # Token bucket 限流器（RPM/TPM）
 │   ├── protocol_test.go     # 单元 + Mock 测试（22 个）
 │   └── openai_integration_test.go # 集成测试（9 个）
 ├── tools/                   # 工具实现

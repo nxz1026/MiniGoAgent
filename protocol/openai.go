@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -16,7 +17,7 @@ import (
 
 func init() {
 	Register("openai", func(cfg Config) (Protocol, error) {
-		return NewOpenAI(cfg.APIKey, cfg.BaseURL, cfg.Model), nil
+		return NewOpenAI(cfg), nil
 	})
 }
 
@@ -29,34 +30,50 @@ const (
 )
 
 type OpenAI struct {
-	apiKey       string
-	baseURL      string
-	model        string
-	client       *http.Client
-	name         string
-	vendor       Vendor
-	effort       string
-	thinkingType string
-	policy       reasoningPolicy
-	Logf         func(format string, args ...any)
-	Telemetry    *Telemetry
-	muUsage      sync.Mutex
-	lastUsage    *Usage
+	apiKey        string
+	apiKeys       []string
+	keyIndex      int
+	baseURL       string
+	model         string
+	client        *http.Client
+	name          string
+	vendor        Vendor
+	effort        string
+	thinkingType  string
+	policy        reasoningPolicy
+	streamTimeout time.Duration
+	rateLimiter   *RateLimiter
+	Logf          func(format string, args ...any)
+	Telemetry     *Telemetry
+	muUsage       sync.Mutex
+	lastUsage     *Usage
 }
 
 func (o *OpenAI) GetTelemetry() *Telemetry { return o.Telemetry }
 
-func NewOpenAI(apiKey, baseURL, model string) *OpenAI {
-	baseURL = strings.TrimRight(baseURL, "/")
-	o := &OpenAI{
-		apiKey:    apiKey,
-		baseURL:   baseURL + "/chat/completions",
-		model:     model,
-		client:    &http.Client{Timeout: 120 * time.Second},
-		name:      model,
-		vendor:    DetectVendor(baseURL),
-		Telemetry: NewTelemetry(),
+func NewOpenAI(cfg Config) *OpenAI {
+	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	apiKeys := cfg.APIKeys
+	if len(apiKeys) == 0 && cfg.APIKey != "" {
+		apiKeys = []string{cfg.APIKey}
 	}
+	timeout := cfg.StreamTimeout
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	o := &OpenAI{
+		apiKey:        cfg.APIKey,
+		apiKeys:       apiKeys,
+		baseURL:       baseURL + "/chat/completions",
+		model:         cfg.Model,
+		client:        &http.Client{Timeout: timeout + 30*time.Second},
+		name:          cfg.Model,
+		vendor:        DetectVendor(baseURL),
+		streamTimeout: timeout,
+		rateLimiter:   NewRateLimiter(cfg.RateLimitRPM, cfg.RateLimitTPM),
+		Telemetry:     NewTelemetry(),
+	}
+	o.Telemetry.SetThresholds(cfg.ContextWarnPct, cfg.ContextCompressPct)
 	switch o.vendor {
 	case VendorDeepSeek:
 		o.policy = reasoningThinking
@@ -70,6 +87,9 @@ func NewOpenAI(apiKey, baseURL, model string) *OpenAI {
 
 func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	start := time.Now()
+	if err := o.rateLimiter.Wait(ctx, estimateTokens(req)); err != nil {
+		return nil, err
+	}
 	ch, err := o.Stream(ctx, req)
 	if err != nil {
 		return nil, err
@@ -94,6 +114,8 @@ func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 			resp.Usage = chunk.Usage
 			o.logf(ctx, "RAW stream usage prompt=%d completion=%d total=%d",
 				chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens)
+		case ChunkWarn:
+			resp.Warning = chunk.Warning
 		case ChunkError:
 			o.logf(ctx, "RAW stream error: %s", chunk.Error)
 			return nil, fmt.Errorf("%s", chunk.Error)
@@ -103,6 +125,14 @@ func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 		len(resp.Content)/1024, len(resp.ToolCalls), resp.Usage)
 	o.Telemetry.Record(o.model, o.vendor.String(), time.Since(start).Seconds(), resp.Usage)
 	return &resp, nil
+}
+
+func estimateTokens(req Request) int {
+	n := 0
+	for _, m := range req.Messages {
+		n += len(m.Content) / 4
+	}
+	return n
 }
 
 const maxReconnectAttempts = 3
@@ -117,12 +147,23 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 	var emitted bool
 	var lastErr error
 	start := time.Now()
+	if err := o.rateLimiter.Wait(ctx, estimateTokens(req)); err != nil {
+		sendChunk(ctx, out, Chunk{Type: ChunkError, Error: err.Error()})
+		return
+	}
 	for attempt := 0; attempt <= maxReconnectAttempts; attempt++ {
 		if attempt > 0 {
 			if emitted {
 				o.logf(ctx, "RAW reconnect attempt=%d skipped (already emitted)", attempt)
 				sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr.Error()})
 				return
+			}
+			// check if auth error — rotate key
+			var ae *AuthError
+			if errors.As(lastErr, &ae) {
+				if o.rotateKey() {
+					o.logf(ctx, "RAW key rotated to index=%d", o.keyIndex)
+				}
 			}
 			delay := backoffDelay(attempt, 0)
 			o.logf(ctx, "RAW reconnect attempt=%d delay=%v err=%v", attempt, delay, lastErr)
@@ -138,6 +179,10 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 		if err != nil {
 			o.logf(ctx, "RAW SendWithRetry attempt=%d err=%v", attempt, err)
 			lastErr = err
+			var ae *AuthError
+			if errors.As(err, &ae) && o.rotateKey() {
+				o.logf(ctx, "RAW key rotated to index=%d on auth error", o.keyIndex)
+			}
 			continue
 		}
 		o.logf(ctx, "RAW HTTP response status=%d", resp.StatusCode)
@@ -172,6 +217,28 @@ func (o *OpenAI) recordStreamCall(start time.Time, err error) {
 	o.Telemetry.Record(o.model, o.vendor.String(), time.Since(start).Seconds(), usage)
 }
 
+func (o *OpenAI) sendContextWarning(ctx context.Context, out chan<- Chunk, usage *Usage) {
+	if usage == nil {
+		return
+	}
+	maxCtx := ModelContextWindow(o.model)
+	if maxCtx <= 0 {
+		return
+	}
+	pct := usage.PromptTokens * 100 / maxCtx
+	if pct >= o.Telemetry.comprPct {
+		sendChunk(ctx, out, Chunk{
+			Type:    ChunkWarn,
+			Warning: fmt.Sprintf("context at %d%% — compression recommended", pct),
+		})
+	} else if pct >= o.Telemetry.warnPct {
+		sendChunk(ctx, out, Chunk{
+			Type:    ChunkWarn,
+			Warning: fmt.Sprintf("context at %d%%", pct),
+		})
+	}
+}
+
 func sendChunk(ctx context.Context, out chan<- Chunk, ch Chunk) {
 	select {
 	case out <- ch:
@@ -188,6 +255,25 @@ func (o *OpenAI) logf(ctx context.Context, format string, args ...any) {
 	}
 }
 
+func (o *OpenAI) currentKey() string {
+	o.muUsage.Lock()
+	defer o.muUsage.Unlock()
+	if o.keyIndex >= 0 && o.keyIndex < len(o.apiKeys) {
+		return o.apiKeys[o.keyIndex]
+	}
+	return o.apiKey
+}
+
+func (o *OpenAI) rotateKey() bool {
+	o.muUsage.Lock()
+	defer o.muUsage.Unlock()
+	if len(o.apiKeys) <= 1 {
+		return false
+	}
+	o.keyIndex = (o.keyIndex + 1) % len(o.apiKeys)
+	return true
+}
+
 func (o *OpenAI) buildHTTPRequest(ctx context.Context, req Request) (*http.Request, error) {
 	body := o.buildBody(req)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL, bytes.NewReader(body))
@@ -195,9 +281,9 @@ func (o *OpenAI) buildHTTPRequest(ctx context.Context, req Request) (*http.Reque
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
-	o.logf(ctx, "RAW POST %s body=%dKB msgs=%d tools=%d model=%s",
-		o.baseURL, len(body)/1024, len(req.Messages), len(req.Tools), o.model)
+	httpReq.Header.Set("Authorization", "Bearer "+o.currentKey())
+	o.logf(ctx, "RAW POST %s body=%dKB msgs=%d tools=%d model=%s key_idx=%d",
+		o.baseURL, len(body)/1024, len(req.Messages), len(req.Tools), o.model, o.keyIndex)
 	return httpReq, nil
 }
 
@@ -380,7 +466,10 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 	defer resp.Body.Close()
 	defer close(out)
 
-	idleTimeout := 120 * time.Second
+	idleTimeout := o.streamTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 120 * time.Second
+	}
 	done := make(chan struct{})
 	defer close(done)
 	activity := make(chan struct{}, 1)
@@ -488,6 +577,7 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 			o.lastUsage = u
 			o.muUsage.Unlock()
 			send(Chunk{Type: ChunkUsage, Usage: u})
+			o.sendContextWarning(ctx, out, u)
 		}
 		if len(sr.Choices) == 0 {
 			continue

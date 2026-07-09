@@ -52,6 +52,12 @@ docker run -p 8080:8080 \
 | `LOG_LEVEL` | `INFO` | Log level |
 | `LOG_DIR` | `logs` | Log directory |
 | `CACHE_TTL` | `30` | Tool result cache TTL (seconds) |
+| `OPENAI_API_KEYS` | — | Multi-key rotation (comma-separated) |
+| `STREAM_TIMEOUT` | `120s` | Stream idle timeout |
+| `RATE_LIMIT_RPM` | `0` | Max requests per minute (0=off) |
+| `RATE_LIMIT_TPM` | `0` | Max tokens per minute (0=off) |
+| `CONTEXT_WARN_PCT` | `40` | Context warning threshold (%) |
+| `CONTEXT_COMPRESS_PCT` | `50` | Context compression signal (%) |
 
 ---
 
@@ -115,6 +121,12 @@ docker run -p 8080:8080 \
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `LOG_DIR` | `logs` | 日志目录 |
 | `CACHE_TTL` | `30` | 工具缓存 TTL（秒） |
+| `OPENAI_API_KEYS` | — | 多 key 轮转（逗号分隔） |
+| `STREAM_TIMEOUT` | `120s` | 流空闲超时 |
+| `RATE_LIMIT_RPM` | `0` | 每分钟请求限制（0=关闭） |
+| `RATE_LIMIT_TPM` | `0` | 每分钟 token 限制（0=关闭） |
+| `CONTEXT_WARN_PCT` | `40` | 上下文预警阈值（%） |
+| `CONTEXT_COMPRESS_PCT` | `50` | 上下文压缩触发阈值（%） |
 
 ---
 

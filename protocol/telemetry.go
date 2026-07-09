@@ -15,13 +15,19 @@ type CallRecord struct {
 }
 
 type Telemetry struct {
-	mu       sync.Mutex
-	last     CallRecord
-	modelCtx map[string]int
+	mu        sync.Mutex
+	last      CallRecord
+	modelCtx  map[string]int
+	warnPct   int
+	comprPct  int
+	lastWarn  bool
+	lastCompr bool
 }
 
 func NewTelemetry() *Telemetry {
 	return &Telemetry{
+		warnPct:  40,
+		comprPct: 50,
 		modelCtx: map[string]int{
 			"gpt-4":             8192,
 			"gpt-4-32k":         32768,
@@ -39,7 +45,7 @@ func NewTelemetry() *Telemetry {
 	}
 }
 
-func (t *Telemetry) Record(model, vendor string, durSec float64, usage *Usage) {
+func (t *Telemetry) Record(model, vendor string, durSec float64, usage *Usage) (warn, compress bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.last = CallRecord{
@@ -53,6 +59,35 @@ func (t *Telemetry) Record(model, vendor string, durSec float64, usage *Usage) {
 		t.last.PromptTokens = usage.PromptTokens
 		t.last.CompletionTokens = usage.CompletionTokens
 	}
+	t.lastWarn, t.lastCompr = false, false
+	if usage != nil && t.warnPct > 0 {
+		maxCtx := ModelContextWindow(model)
+		if maxCtx > 0 {
+			pct := usage.PromptTokens * 100 / maxCtx
+			if t.comprPct > 0 && pct >= t.comprPct {
+				t.lastCompr = true
+				compress = true
+			}
+			if pct >= t.warnPct {
+				t.lastWarn = true
+				warn = true
+			}
+		}
+	}
+	return
+}
+
+func (t *Telemetry) SetThresholds(warnPct, compressPct int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.warnPct = warnPct
+	t.comprPct = compressPct
+}
+
+func (t *Telemetry) LastWarning() (warn, compress bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastWarn, t.lastCompr
 }
 
 func (t *Telemetry) Last() CallRecord {

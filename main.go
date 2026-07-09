@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -203,10 +205,17 @@ func main() {
 		log.Fatal("请设置 OPENAI_API_KEY 和 OPENAI_BASE_URL")
 	}
 
+	streamTimeout, _ := time.ParseDuration(getEnv("STREAM_TIMEOUT", "120s"))
 	proto, err := protocol.New("openai", protocol.Config{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   getEnv("OPENAI_MODEL", "deepseek-v4-flash"),
+		APIKey:             apiKey,
+		APIKeys:            splitEnv("OPENAI_API_KEYS"),
+		BaseURL:            baseURL,
+		Model:              getEnv("OPENAI_MODEL", "deepseek-v4-flash"),
+		StreamTimeout:      streamTimeout,
+		RateLimitRPM:       getEnvInt("RATE_LIMIT_RPM", 0),
+		RateLimitTPM:       getEnvInt("RATE_LIMIT_TPM", 0),
+		ContextWarnPct:     getEnvInt("CONTEXT_WARN_PCT", 40),
+		ContextCompressPct: getEnvInt("CONTEXT_COMPRESS_PCT", 50),
 	})
 	if err != nil {
 		log.Fatal("创建 Protocol 失败: %v", err)
@@ -596,4 +605,32 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func splitEnv(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
