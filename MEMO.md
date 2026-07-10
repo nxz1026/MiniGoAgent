@@ -459,3 +459,30 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 115. `protocol/protocol_test.go`：新增 `TestTelemetry_RecordFromContextDoesNotShareSession`，并发写入两个 session 的 usage 记录，验证 `RecordFromContext` 不再通过共享 `Telemetry.sessionID` 串 session
 116. `protocol/usage_tracker.go`：回归测试暴露 SQLite 并发写丢记录问题；`UsageTracker.Record()` 改回独占 `Lock()` 串行写入，查询仍用 `RLock()`，确保 SQLite 写入稳定
 117. 验证：`gofmt` 已执行；`go build ./...` 通过；`go test ./protocol/ -run "TestTelemetry_RecordFromContextDoesNotShareSession|TestEventBus_StopDoesNotDeadlock" -count=1 -v` 通过；`go clean -testcache; go test ./... -count=1` 通过；`go vet ./...` 通过
+
+### 第十八轮（2026-07-10）：架构冻结文档 — RAW 优化清单 + DSPy PromptLab 边界
+
+118. 新增 `ARCHITECTURE.md`：冻结当前真实架构，明确 `main.go` / `protocol/` / `tools/` / `frontend/` / `reference/eino` 的现有职责；强调文档优先描述当前事实，不把理想架构误写成已完成实现
+119. `ARCHITECTURE.md` 新增 RAW 层职责边界：`protocol/` 当前是 LLM provider protocol / RAW gateway，不是 MCP；负责 OpenAI-compatible 调用、SSE、vendor policy、retry/reconnect/rate limit/circuit breaker/health/failover、raw log、redaction、SSRF、usage analytics、lifecycle hooks
+120. `ARCHITECTURE.md` 记录已完成 RAW 优化，避免后续重构误删或重复设计：RTK-style terminal output filter（`tools/filter/` + `tools/terminal.go`）、Headroom-inspired content compression（`content_detector.go` / `content_predict.go` / `content_compress.go` / `CachedCompressContent` / Live Zone）、OpenAI-compatible protocol support（`protocol/openai.go`）
+121. `ARCHITECTURE.md` 补录容易漏掉的 RAW 工程化能力：HTTP retry、stream reconnect、`StreamInterruptedError`、CircuitBreaker、HealthChecker/HealthManager、RateLimiter、multi-key rotation、SSRF、secret redaction、RawLogProcessor、EventBus、UsageTracker、Structured RAW Query API、local-only MCP usage endpoint、lifecycle hooks、body pool、shared transport、schema canonicalization、tool sanitization、ContentPredictor
+122. `ARCHITECTURE.md` 明确 DSPy prompt 自我迭代归属：放在未来 `Prompt Optimization / PromptLab` 侧车层，服务 ADK runtime 的 `PromptProvider`；不得放入 RAW/Gateway/MCP/Skill；不得在在线用户请求链路实时运行；candidate prompt 必须经 eval/promotion 后成为 stable prompt
+123. `ARCHITECTURE.md` 记录下一步 guardrails：允许先拆 `internal/config`、`internal/session`、`internal/server`，预留 `AgentRunner`/`PromptProvider`；暂不删除/重命名 `protocol/`，暂不迁移 `tools/`，暂不移除 `reference/eino` replace，暂不把 DSPy 接入在线链路
+124. 验证：`go clean -testcache; go test ./... -count=1` 通过（MiniGoAgent / protocol / tools 全部 ok；filter/log/sessionlog 无测试文件）
+
+### 第十九轮（2026-07-10）：长期架构重构 Phase 1.1 — internal/config 抽出
+
+125. 新增 `internal/config/config.go`：集中 `.env` 读取、环境变量默认值、整数/列表解析和 typed `Config` 聚合；包含 `OpenAIConfig`、`ServerConfig`、`AgentConfig`、`RawConfig`、`SecurityConfig`
+126. `main.go`：启动入口改为 `cfg := config.Load()`；`OPENAI_*`、`STREAM_TIMEOUT`、`RATE_LIMIT_*`、`CONTEXT_*`、`MAX_RECONNECT_ATTEMPTS`、`AGENT_MAX_STEP`、`RAW_LOG*`、`USAGE_DB*`、`PORT` 等配置全部从 `cfg` 读取；删除 main 内旧 `loadEnv`/`getEnv`/`getEnvInt`/`splitEnv` helper
+127. 新增 `internal/config/config_test.go`：覆盖 `GetEnv`、`GetEnvInt`、`SplitEnv`、`LoadEnvFile`、`Load()` 聚合配置；`main_test.go` 删除旧 env helper 测试，保留 image/history/forwardChat 测试
+128. `ARCHITECTURE.md`：同步更新当前真实分层，记录 `internal/config` 已成为第一层拆出的 internal package；下一步 guardrails 中移除“抽 config”待办
+129. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 通过（MiniGoAgent / internal/config / protocol / tools 全部 ok）；`go vet ./...` 通过
+
+### 第二十轮（2026-07-10）：长期架构重构 Phase 1.2 — internal/session 抽出
+
+130. 新增 `internal/session/manager.go`：`Manager` 结构体封装 `map[string][]*schema.Message`（+sync.Mutex），提供 `SnapshotWith`/`Append`/`Count`/`Save`/`Load` 方法；导出 `Marshal`/`Unmarshal` 全局函数用于 DTO 序列化；`historyMessage`/`historyToolCall` DTO 类型从 `main.go` 迁移至此
+131. `main.go`：`chatServer.sessions` 类型改为 `*session.Manager`；`SnapshotWith`/`Append` 调用替换为 s.sessions 方法；`saveHistory`/`loadHistory` 改为委托 `s.sessions.Save/Load`；删除原 DTO 类型和 `marshalSessions`/`unmarshalSessions` 函数
+132. `internal/session/manager_test.go` 新增：`TestHistoryDTORoundtrip`、`TestHistoryDTOJSONCompat`（从 `main_test.go` 迁移）
+133. `main_test.go`：删除已迁移的 `TestHistoryDTORoundtrip`/`TestHistoryDTOJSONCompat`，删除不再使用的 `encoding/json`/`schema` 导入
+134. `ARCHITECTURE.md`：表的 `main.go` 行移除 "session state"；新增 `internal/session` 行；Sec 6 移除 "Maintain sessions in memory" / "Persist history"；Sec 10 更新 main.go 债务描述；Sec 11 将 session 移至 "Completed steps"
+135. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 通过（MiniGoAgent / internal/config / internal/session / protocol / tools 全部 ok）；`go vet ./...` 通过

@@ -12,9 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +23,8 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
+	"MiniGoAgent/internal/config"
+	appsession "MiniGoAgent/internal/session"
 	"MiniGoAgent/protocol"
 	"MiniGoAgent/tools"
 	"MiniGoAgent/tools/log"
@@ -216,11 +216,9 @@ func (m *chatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatMo
 // ---------- HTTP Server ----------
 
 type chatServer struct {
-	agent          *react.Agent
-	llm            *chatModel
-	sessions       map[string][]*schema.Message
-	defaultSession string
-	mu             sync.Mutex
+	agent    *react.Agent
+	llm      *chatModel
+	sessions *appsession.Manager
 }
 
 type chatReq struct {
@@ -232,11 +230,11 @@ type chatResp struct {
 }
 
 func main() {
-	loadEnv()
+	cfg := config.Load()
 	ctx := context.Background()
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	baseURL := os.Getenv("OPENAI_BASE_URL")
+	apiKey := cfg.OpenAI.APIKey
+	baseURL := cfg.OpenAI.BaseURL
 	if apiKey == "" || baseURL == "" {
 		log.Fatal("请设置 OPENAI_API_KEY 和 OPENAI_BASE_URL")
 	}
@@ -247,48 +245,47 @@ func main() {
 		log.Warn("Proxy 环境变量异常: %v", err)
 	}
 
-	streamTimeout, _ := time.ParseDuration(getEnv("STREAM_TIMEOUT", "120s"))
 	proto, err := protocol.New("openai", protocol.Config{
 		APIKey:             apiKey,
-		APIKeys:            splitEnv("OPENAI_API_KEYS"),
+		APIKeys:            cfg.OpenAI.APIKeys,
 		BaseURL:            baseURL,
-		Model:              getEnv("OPENAI_MODEL", "deepseek-v4-flash"),
-		StreamTimeout:      streamTimeout,
-		RateLimitRPM:       getEnvInt("RATE_LIMIT_RPM", 0),
-		RateLimitTPM:       getEnvInt("RATE_LIMIT_TPM", 0),
-		ContextWarnPct:     getEnvInt("CONTEXT_WARN_PCT", 40),
-		ContextCompressPct: getEnvInt("CONTEXT_COMPRESS_PCT", 50),
-		MaxReconnect:       getEnvInt("MAX_RECONNECT_ATTEMPTS", 3),
-		FallbackModel:      getEnv("OPENAI_FALLBACK_MODEL", ""),
-		FallbackBaseURL:    getEnv("OPENAI_FALLBACK_BASE_URL", ""),
+		Model:              cfg.OpenAI.Model,
+		StreamTimeout:      cfg.OpenAI.StreamTimeout,
+		RateLimitRPM:       cfg.OpenAI.RateLimitRPM,
+		RateLimitTPM:       cfg.OpenAI.RateLimitTPM,
+		ContextWarnPct:     cfg.Agent.ContextWarnPct,
+		ContextCompressPct: cfg.Agent.ContextCompressPct,
+		MaxReconnect:       cfg.Agent.MaxReconnect,
+		FallbackModel:      cfg.OpenAI.FallbackModel,
+		FallbackBaseURL:    cfg.OpenAI.FallbackBaseURL,
 	})
 	if err != nil {
 		log.Fatal("创建 Protocol 失败: %v", err)
 	}
-	if getEnv("RAW_LOG", "") == "1" {
+	if cfg.Raw.RawLog {
 		if p, ok := proto.(interface{ GetEventBus() *protocol.EventBus }); ok {
-			rawLog := protocol.NewRawLogProcessor(getEnv("RAW_LOG_DIR", "logs/raw"))
+			rawLog := protocol.NewRawLogProcessor(cfg.Raw.RawLogDir)
 			p.GetEventBus().Subscribe("raw", rawLog)
-			log.Info("RAW 日志已启用: %s", getEnv("RAW_LOG_DIR", "logs/raw"))
+			log.Info("RAW 日志已启用: %s", cfg.Raw.RawLogDir)
 		}
 	}
 	var mcpServer *protocol.MCPServer
 	var usageTracker *protocol.UsageTracker
-	if getEnv("USAGE_DB", "") == "1" {
+	if cfg.Raw.UsageDB {
 		var utErr error
-		usageTracker, utErr = protocol.NewUsageTracker("logs/raw/usage.db")
+		usageTracker, utErr = protocol.NewUsageTracker(cfg.Raw.UsageDBPath)
 		if utErr != nil {
 			log.Warn("Usage 数据库初始化失败: %v", utErr)
 		} else {
 			type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
 			if p, ok := proto.(statsProvider); ok {
 				p.GetTelemetry().SetTracker(usageTracker)
-				log.Info("Usage 追踪已启用: logs/raw/usage.db")
+				log.Info("Usage 追踪已启用: %s", cfg.Raw.UsageDBPath)
 			}
 			mcpServer = protocol.NewMCPServer(usageTracker)
 		}
 	}
-	llm := &chatModel{proto: proto, model: getEnv("OPENAI_MODEL", "deepseek-v4-flash")}
+	llm := &chatModel{proto: proto, model: cfg.OpenAI.Model}
 
 	terminalTool, _ := utils.InferTool("terminal", "在 Windows 终端执行 shell 命令", tools.RunTerminal)
 	searchTool, _ := utils.InferTool("web_search", "在互联网上搜索信息", tools.WebSearch)
@@ -303,7 +300,7 @@ func main() {
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel:   llm,
 		ToolsConfig:        compose.ToolsNodeConfig{Tools: []tool.BaseTool{terminalTool, searchTool, compressTool, readFileTool, writeFileTool, editFileTool, globTool, grepTool, visionTool}},
-		MaxStep:            getEnvInt("AGENT_MAX_STEP", 12),
+		MaxStep:            cfg.Agent.MaxStep,
 		ToolReturnDirectly: map[string]struct{}{"compress": {}},
 		MessageRewriter: func(ctx context.Context, msgs []*schema.Message) []*schema.Message {
 			if len(msgs) <= 6 {
@@ -320,7 +317,7 @@ func main() {
 		log.Fatal("创建 Agent 失败: %v", err)
 	}
 
-	srv := &chatServer{agent: agent, llm: llm, sessions: map[string][]*schema.Message{}, defaultSession: "default"}
+	srv := &chatServer{agent: agent, llm: llm, sessions: appsession.NewManager("default")}
 	srv.loadHistory()
 	http.HandleFunc("/", srv.serveFrontend)
 	http.HandleFunc("/api/chat", srv.handleChat)
@@ -329,10 +326,10 @@ func main() {
 	http.HandleFunc("/api/vision/native", srv.handleVisionNativeStream)
 	if mcpServer != nil {
 		http.Handle("/mcp", mcpServer)
-		log.Info("MCP Server 已启用: ws://localhost:%s/mcp", getEnv("PORT", "8080"))
+		log.Info("MCP Server 已启用: ws://localhost:%s/mcp", cfg.Server.Port)
 	}
 
-	port := getEnv("PORT", "8080")
+	port := cfg.Server.Port
 	log.Info("MiniGoAgent UI: http://localhost:%s", port)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -383,7 +380,7 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	sid := s.sessionID(r)
 	userMsg := schema.UserMessage(req.Message)
-	msgs := s.snapshotWith(sid, userMsg)
+	msgs := s.sessions.SnapshotWith(sid, userMsg)
 
 	s.logUserMessage(sid, req.Message)
 
@@ -436,7 +433,7 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
-	s.appendMessages(sid, userMsg, &schema.Message{Role: schema.Assistant, Content: fullContent.String()})
+	s.sessions.Append(sid, userMsg, &schema.Message{Role: schema.Assistant, Content: fullContent.String()})
 
 	s.logAssistantResponse(sid, fullContent.String())
 }
@@ -484,27 +481,7 @@ func (s *chatServer) sessionID(r *http.Request) string {
 	if c, err := r.Cookie("session"); err == nil && c.Value != "" {
 		return c.Value
 	}
-	return s.defaultSession
-}
-
-func (s *chatServer) messages(sid string) []*schema.Message {
-	if msgs, ok := s.sessions[sid]; ok {
-		return msgs
-	}
-	return nil
-}
-
-func (s *chatServer) snapshotWith(sid string, extra ...*schema.Message) []*schema.Message {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	msgs := append([]*schema.Message(nil), s.sessions[sid]...)
-	return append(msgs, extra...)
-}
-
-func (s *chatServer) appendMessages(sid string, msgs ...*schema.Message) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[sid] = append(s.sessions[sid], msgs...)
+	return s.sessions.DefaultSession()
 }
 
 func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -538,14 +515,14 @@ func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userMsg := schema.UserMessage(req.Message)
-	msgs := s.snapshotWith(sid, userMsg)
+	msgs := s.sessions.SnapshotWith(sid, userMsg)
 	ctx := s.injectLogCtx(r.Context(), sid)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
-	s.appendMessages(sid, userMsg, result)
+	s.sessions.Append(sid, userMsg, result)
 
 	s.logAssistantResponse(sid, result.Content)
 
@@ -577,13 +554,13 @@ func (s *chatServer) handleVision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + req.Prompt + "\n\n图片分析结果：\n" + visionResult)
-	msgs := s.snapshotWith(sid, userMsg)
+	msgs := s.sessions.SnapshotWith(sid, userMsg)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
-	s.appendMessages(sid, userMsg, result)
+	s.sessions.Append(sid, userMsg, result)
 	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 }
 
@@ -610,13 +587,13 @@ func (s *chatServer) handleVisionFromChat(w http.ResponseWriter, r *http.Request
 			Content:               "[图片] " + prompt,
 			UserInputMultiContent: []schema.MessageInputPart{textPart, imagePart},
 		}
-		msgs := s.snapshotWith(sid, userMsg)
+		msgs := s.sessions.SnapshotWith(sid, userMsg)
 		result, err := s.agent.Generate(ctx, msgs)
 		if err != nil {
 			json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 			return
 		}
-		s.appendMessages(sid, userMsg, result)
+		s.sessions.Append(sid, userMsg, result)
 		json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 		return
 	}
@@ -626,13 +603,13 @@ func (s *chatServer) handleVisionFromChat(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + prompt + "\n\n图片分析结果：\n" + visionResult)
-	msgs := s.snapshotWith(sid, userMsg)
+	msgs := s.sessions.SnapshotWith(sid, userMsg)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
-	s.appendMessages(sid, userMsg, result)
+	s.sessions.Append(sid, userMsg, result)
 	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 }
 
@@ -648,7 +625,7 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 	}
 
 	sid := s.sessionID(r)
-	msgs := s.snapshotWith(sid)
+	msgs := s.sessions.SnapshotWith(sid)
 
 	s.logUserMessage(sid, "[图片] "+req.Prompt)
 
@@ -674,7 +651,7 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 
-		s.appendMessages(sid,
+		s.sessions.Append(sid,
 			schema.UserMessage("[图片] "+req.Prompt+"\n\n图片分析结果：\n"+visionResult),
 			&schema.Message{Role: schema.Assistant, Content: visionResult},
 		)
@@ -729,7 +706,7 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 	}
 
 	resultMsg := &schema.Message{Role: schema.Assistant, Content: fullContent.String()}
-	s.appendMessages(sid, userMsg, resultMsg)
+	s.sessions.Append(sid, userMsg, resultMsg)
 
 	if statsJSON := s.llm.StatsJSON(); statsJSON != "" {
 		fmt.Fprintf(w, "data: %s\n\n", statsJSON)
@@ -737,120 +714,25 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// ---------- history persistence (DTO isolated from eino types) ----------
-
-const historyFile = "history.json"
-
-type historyToolCall struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
-type historyMessage struct {
-	Role             string            `json:"role"`
-	Content          string            `json:"content"`
-	ReasoningContent string            `json:"reasoning_content,omitempty"`
-	ToolCalls        []historyToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string            `json:"tool_call_id,omitempty"`
-	Name             string            `json:"name,omitempty"`
-}
-
-func toHistoryMsg(m *schema.Message) historyMessage {
-	hm := historyMessage{
-		Role:             string(m.Role),
-		Content:          m.Content,
-		ReasoningContent: m.ReasoningContent,
-		ToolCallID:       m.ToolCallID,
-		Name:             m.Name,
-	}
-	for _, tc := range m.ToolCalls {
-		hm.ToolCalls = append(hm.ToolCalls, historyToolCall{
-			ID: tc.ID, Type: tc.Type, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
-		})
-	}
-	return hm
-}
-
-func fromHistoryMsg(hm historyMessage) *schema.Message {
-	m := &schema.Message{
-		Role:             schema.RoleType(hm.Role),
-		Content:          hm.Content,
-		ReasoningContent: hm.ReasoningContent,
-		ToolCallID:       hm.ToolCallID,
-		Name:             hm.Name,
-	}
-	for _, tc := range hm.ToolCalls {
-		m.ToolCalls = append(m.ToolCalls, schema.ToolCall{
-			ID: tc.ID, Type: tc.Type,
-			Function: schema.FunctionCall{Name: tc.Name, Arguments: tc.Arguments},
-		})
-	}
-	return m
-}
-
-func marshalSessions(sessions map[string][]*schema.Message) ([]byte, error) {
-	dto := make(map[string][]historyMessage, len(sessions))
-	for sid, msgs := range sessions {
-		hmsgs := make([]historyMessage, len(msgs))
-		for i, m := range msgs {
-			hmsgs[i] = toHistoryMsg(m)
-		}
-		dto[sid] = hmsgs
-	}
-	return json.Marshal(dto)
-}
-
-func unmarshalSessions(data []byte) (map[string][]*schema.Message, error) {
-	var dto map[string][]historyMessage
-	if err := json.Unmarshal(data, &dto); err != nil {
-		return nil, err
-	}
-	sessions := make(map[string][]*schema.Message, len(dto))
-	for sid, hmsgs := range dto {
-		msgs := make([]*schema.Message, len(hmsgs))
-		for i, hm := range hmsgs {
-			msgs[i] = fromHistoryMsg(hm)
-		}
-		sessions[sid] = msgs
-	}
-	return sessions, nil
-}
-
 func (s *chatServer) saveHistory() {
 	sessionlog.CloseAll()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.sessions) == 0 {
-		return
-	}
-	data, err := marshalSessions(s.sessions)
-	if err != nil {
-		log.Warn("保存历史失败: %v", err)
-		return
-	}
-	if err := os.WriteFile(historyFile, data, 0644); err != nil {
+	if err := s.sessions.Save(appsession.DefaultHistoryFile); err != nil {
 		log.Warn("保存历史文件失败: %v", err)
 	} else {
-		log.Info("已保存 %d 个会话到 %s", len(s.sessions), historyFile)
+		log.Info("已保存 %d 个会话到 %s", s.sessions.Count(), appsession.DefaultHistoryFile)
 	}
 }
 
 func (s *chatServer) loadHistory() {
-	data, err := os.ReadFile(historyFile)
+	n, err := s.sessions.Load(appsession.DefaultHistoryFile)
 	if err != nil {
-		return
-	}
-	sessions, err := unmarshalSessions(data)
-	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
 		log.Warn("读取历史文件失败: %v", err)
 		return
 	}
-	for k, v := range sessions {
-		s.sessions[k] = v
-	}
-	log.Info("已恢复 %d 个会话的历史", len(sessions))
+	log.Info("已恢复 %d 个会话的历史", n)
 }
 
 // ---------- helpers ----------
@@ -957,59 +839,6 @@ func supportsVision(model string) bool {
 	return false
 }
 
-func loadEnv() {
-	data, err := os.ReadFile(".env")
-	if err != nil {
-		return
-	}
-	text := strings.ReplaceAll(string(data), "\r", "")
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if ok {
-			os.Setenv(strings.TrimSpace(k), strings.TrimSpace(v))
-		}
-	}
-}
-
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func getEnvInt(key string, fallback int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return fallback
-	}
-	return n
-}
-
 func strPtr(s string) *string {
 	return &s
-}
-
-func splitEnv(key string) []string {
-	v := os.Getenv(key)
-	if v == "" {
-		return nil
-	}
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
