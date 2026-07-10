@@ -498,6 +498,9 @@ func (o *OpenAI) buildBody(req Request, stream bool) []byte {
 	m["model"] = o.model
 	m["messages"] = o.toWireMessages(NormalizeMessages(req.Messages))
 	m["stream"] = stream
+	if stream {
+		m["stream_options"] = map[string]any{"include_usage": true}
+	}
 	if len(req.Tools) > 0 {
 		m["tools"] = o.toWireTools(req.Tools)
 	}
@@ -514,7 +517,11 @@ func (o *OpenAI) buildBody(req Request, stream bool) []byte {
 		m["stop"] = req.Stop
 	}
 	o.buildThinkingFields(m)
-	body, _ := json.Marshal(m)
+	body, err := json.Marshal(m)
+	if err != nil {
+		bodyPool.Put(m)
+		return []byte("{}")
+	}
 	bodyPool.Put(m)
 	return body
 }

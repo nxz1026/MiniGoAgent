@@ -81,34 +81,65 @@ func (b *Bridge) stream(ctx context.Context, input []*schema.Message, opts ...mo
 	sr, sw := schema.Pipe[*schema.Message](64)
 	go func() {
 		defer sw.Close()
+		var (
+			fullContent      string
+			fullReasoning    string
+			toolCalls        []schema.ToolCall
+			streamInterrupted bool
+		)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case chunk, ok := <-ch:
 				if !ok {
+					if !streamInterrupted {
+						msg := &schema.Message{Role: schema.Assistant, Content: fullContent, ReasoningContent: fullReasoning}
+						if len(toolCalls) > 0 {
+							msg.ToolCalls = toolCalls
+						}
+						sw.Send(msg, nil)
+					}
 					return
 				}
 				switch chunk.Type {
 				case protocol.ChunkText:
-					if sw.Send(&schema.Message{Role: schema.Assistant, Content: chunk.Text}, nil) {
-						return
-					}
+					fullContent += chunk.Text
 				case protocol.ChunkReasoning:
-					if sw.Send(&schema.Message{Role: schema.Assistant, ReasoningContent: chunk.Text}, nil) {
+					fullReasoning += chunk.Text
+				case protocol.ChunkToolCallStart:
+					if chunk.ToolCall != nil {
+						toolCalls = append(toolCalls, schema.ToolCall{
+							ID:   chunk.ToolCall.ID,
+							Type: "function",
+							Function: schema.FunctionCall{Name: chunk.ToolCall.Name},
+						})
+					}
+				case protocol.ChunkToolCall:
+					for i := range toolCalls {
+						if toolCalls[i].ID == chunk.ToolCall.ID {
+							toolCalls[i].Function.Arguments = chunk.ToolCall.Arguments
+							break
+						}
+					}
+				case protocol.ChunkDone:
+					msg := &schema.Message{Role: schema.Assistant, Content: fullContent, ReasoningContent: fullReasoning}
+					if len(toolCalls) > 0 {
+						msg.ToolCalls = toolCalls
+					}
+					if sw.Send(msg, nil) {
 						return
 					}
 				case protocol.ChunkError:
 					var interrupted *protocol.StreamInterruptedError
 					if chunk.Error != nil && errors.As(chunk.Error, &interrupted) {
+						streamInterrupted = true
 						sw.Send(&schema.Message{Role: schema.Assistant, Content: "[流中断，正在恢复...]"}, nil)
 						resp, err := b.proto.Chat(ctx, req)
 						if err != nil {
 							return
 						}
-						if resp.Content != "" {
-							sw.Send(&schema.Message{Role: schema.Assistant, Content: resp.Content}, nil)
-						}
+						sw.Send(fromProtoResp(resp), nil)
 					}
 					return
 				}

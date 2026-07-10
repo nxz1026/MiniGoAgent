@@ -165,13 +165,46 @@ func (m *ChatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 	sr, sw := schema.Pipe[*schema.Message](64)
 	go func() {
 		defer sw.Close()
+		var (
+			fullContent   string
+			fullReasoning string
+			toolCalls     []schema.ToolCall
+			interrupted   bool
+		)
 		for chunk := range ch {
 			switch chunk.Type {
 			case protocol.ChunkText:
-				sw.Send(&schema.Message{Role: schema.Assistant, Content: chunk.Text}, nil)
+				fullContent += chunk.Text
+			case protocol.ChunkReasoning:
+				fullReasoning += chunk.Text
+			case protocol.ChunkToolCallStart:
+				if chunk.ToolCall != nil {
+					toolCalls = append(toolCalls, schema.ToolCall{
+						ID:   chunk.ToolCall.ID,
+						Type: "function",
+						Function: schema.FunctionCall{Name: chunk.ToolCall.Name},
+					})
+				}
+			case protocol.ChunkToolCall:
+				for i := range toolCalls {
+					if toolCalls[i].ID == chunk.ToolCall.ID {
+						toolCalls[i].Function.Arguments = chunk.ToolCall.Arguments
+						break
+					}
+				}
+			case protocol.ChunkDone:
+				msg := &schema.Message{Role: schema.Assistant, Content: fullContent, ReasoningContent: fullReasoning}
+				if len(toolCalls) > 0 {
+					msg.ToolCalls = toolCalls
+				}
+				sw.Send(msg, nil)
+				fullContent = ""
+				fullReasoning = ""
+				toolCalls = nil
 			case protocol.ChunkError:
-				var interrupted *protocol.StreamInterruptedError
-				if chunk.Error != nil && errors.As(chunk.Error, &interrupted) {
+				var streamErr *protocol.StreamInterruptedError
+				if chunk.Error != nil && errors.As(chunk.Error, &streamErr) {
+					interrupted = true
 					sw.Send(&schema.Message{Role: schema.Assistant, Content: "[流中断，正在恢复...]"}, nil)
 					resp, err := m.forwardChat(ctx, req)
 					if err != nil {
@@ -182,6 +215,13 @@ func (m *ChatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 				}
 				return
 			}
+		}
+		if !interrupted {
+			msg := &schema.Message{Role: schema.Assistant, Content: fullContent, ReasoningContent: fullReasoning}
+			if len(toolCalls) > 0 {
+				msg.ToolCalls = toolCalls
+			}
+			sw.Send(msg, nil)
 		}
 	}()
 	return sr, nil
