@@ -119,7 +119,9 @@ func (r *ToolRegistry) Check(ctx context.Context, name string) bool {
 		return cached.available
 	}
 
-	t := r.Get(name)
+	r.mu.RLock()
+	t := r.tools[name]
+	r.mu.RUnlock()
 	if t == nil {
 		return false
 	}

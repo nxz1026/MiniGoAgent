@@ -120,6 +120,11 @@ func (s *Server) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	var fullContent strings.Builder
 	for {
+		select {
+		case <-r.Context().Done():
+			return
+		default:
+		}
 		chunk, err := stream.Recv()
 		if err == io.EOF {
 			break
@@ -433,11 +438,15 @@ func extractLocalImagePath(input string) string {
 	if trimmed == "" {
 		return ""
 	}
-	ext := strings.ToLower(filepath.Ext(trimmed))
+	path, err := tools.ValidatePath(trimmed)
+	if err != nil {
+		return ""
+	}
+	ext := strings.ToLower(filepath.Ext(path))
 	for _, e := range imgExts {
 		if ext == e {
-			if _, err := os.Stat(trimmed); err == nil {
-				return trimmed
+			if _, err := os.Stat(path); err == nil {
+				return path
 			}
 		}
 	}

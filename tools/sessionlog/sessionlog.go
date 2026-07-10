@@ -182,7 +182,7 @@ func (l *Logger) LogDir() string {
 }
 
 var global struct {
-	mu     sync.Mutex
+	mu      sync.Mutex
 	loggers map[string]*Logger
 }
 var defaultLogDir string

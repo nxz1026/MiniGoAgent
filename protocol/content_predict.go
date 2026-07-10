@@ -20,7 +20,7 @@ type ContentPredictor struct {
 func NewContentPredictor(enabled bool) *ContentPredictor {
 	return &ContentPredictor{
 		enabled: enabled,
-		model:  &heuristicModel{},
+		model:   &heuristicModel{},
 	}
 }
 

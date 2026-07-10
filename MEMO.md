@@ -671,3 +671,26 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 190. 新增回归测试：TestRunnerRunNilResponse、TestRunnerStreamContextCancel、TestRunnerStreamPublishesAgentEnd、TestRunnerStreamBeforeModelRuns/Blocks、TestGuardrailBlocksRuntimeToolCall、TestGuardrailAllowsPermittedToolCall、convert 包往返测试、TestExecutor_ConcurrencyLimit、TestPublishHandlerPanicIsolation
 191. 验证：go build ./... 通过；go clean -testcache; go test ./... -count=1 全部通过；go vet ./... 通过；ADK+server 连续 3 轮全绿，无 flaky
 192. 文档：ARCHITECTURE.md 更新 convert 包、两层 guardrails、EventBus panic 隔离，新增「Stream 中间件限制」说明段
+
+### 第三十一轮（2026-07-10）：Code Review 修复 — 阻塞性 + 重要项
+
+193. **阻塞性修复（6 项）**：
+    - `protocol/types.go`：`CircuitBreaker.Check()` 写操作从 `RLock` 改为 `Lock`，消除数据竞争
+    - `main.go`：信号处理器改用 `http.Server.Shutdown()` 优雅关闭 HTTP 服务器；移除 `os.Exit(0)`；新增 `time` 导入；`bus.Stop()` 移除（ADK event.Bus 无需停止）
+    - `internal/config/config.go`：`ServerConfig` 新增 `WorkspaceRoot` 字段；`WORKSPACE_ROOT` 环境变量读取，默认 `.`
+    - `tools/fileops.go`：新增 `SetWorkspaceRoot` + `ValidatePath` 全局路径校验；ReadFile/WriteFile/EditFile/GlobFiles/GrepFiles 全部接入 `ValidatePath`
+    - `internal/server/server.go`：`extractLocalImagePath` 改为调用 `tools.ValidatePath`，拒绝 workspace 外路径
+    - `main.go`：启动后调用 `tools.SetWorkspaceRoot(cfg.Server.WorkspaceRoot)` 初始化工作区根目录
+    - `tools/terminal.go`：`runElevated` 改用 `os.CreateTemp("", "elevated_*.txt")` 随机临时文件，defer `os.Remove`，防止 symlink 攻击；移除未使用的 `path/filepath` 导入
+    - `internal/adk/runner.go`：`Run` 和 `Stream` 中 `req.Messages` 追加改为新建切片 `make([]*adktypes.Message, 0, ...)`，避免原地修改调用者数据
+
+194. **重要修复（6 项）**：
+    - `internal/adk/tool/registry.go`：`Check()` 移除 `r.Get(name)`，改为内联 `r.mu.RLock()` 保护工具指针读取，消除 TOCTOU 竞态
+    - `internal/server/server.go`：`HandleChatStream` 循环内增加 `select { case <-r.Context().Done(): return }`，客户端断开时及时退出
+    - `protocol/stream.go`：`Publish` 增加 `default` 非阻塞分支，通道满时不再阻塞生产者 goroutine
+    - `tools/vision.go`：`fetchImage` 增加 private IP 校验；默认拒绝内网/LAN URL；`ALLOW_PRIVATE_IMAGE_URLS=true` 显式放行；新增 `net/url` 导入
+    - `protocol/url_validator.go`：新增 `IsPrivateHost(host string) bool` 导出函数，供 `tools/vision.go` 调用
+    - `protocol/telemetry.go`：`RecordFromContext` 移除冗余 if/else 分支，直接 `sid, _ := ctx.Value(CtxSessionID).(string)` 后调用 `t.record`
+    - `main.go`：`AgentConfig` 添加注释 `// Middleware 和 Guardrails 默认 nil，不启用；如需启用需显式配置`
+
+195. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（MiniGoAgent / internal/adk / internal/config / internal/server / internal/session / protocol / tools 全部 ok）；`go vet ./...` 通过

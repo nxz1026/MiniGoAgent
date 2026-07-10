@@ -62,7 +62,7 @@ type Response struct {
 type ChunkType int
 
 const (
-	ChunkText          ChunkType = iota
+	ChunkText ChunkType = iota
 	ChunkReasoning
 	ChunkToolCallStart
 	ChunkToolCall
@@ -96,19 +96,19 @@ type Protocol interface {
 }
 
 type Config struct {
-	APIKey           string
-	APIKeys          []string
-	BaseURL          string
-	Model            string
-	StreamTimeout    time.Duration
-	RateLimitRPM     int
-	RateLimitTPM     int
-	ContextWarnPct   int
+	APIKey             string
+	APIKeys            []string
+	BaseURL            string
+	Model              string
+	StreamTimeout      time.Duration
+	RateLimitRPM       int
+	RateLimitTPM       int
+	ContextWarnPct     int
 	ContextCompressPct int
-	MaxReconnect     int
-	HealthCheckURL   string
-	FallbackModel    string
-	FallbackBaseURL  string
+	MaxReconnect       int
+	HealthCheckURL     string
+	FallbackModel      string
+	FallbackBaseURL    string
 }
 
 type contextKey string
@@ -125,9 +125,9 @@ const MaxRetries = 10
 const maxBackoff = 15 * time.Second
 
 type AuthError struct {
-	Vendor   Vendor
-	Status   int
-	HasKey   bool
+	Vendor Vendor
+	Status int
+	HasKey bool
 }
 
 func (e *AuthError) Error() string {
@@ -163,26 +163,26 @@ func (e *StreamInterruptedError) Unwrap() error {
 type CircuitBreakerState int
 
 const (
-    Closed CircuitBreakerState = iota
-    Open
-    HalfOpen
+	Closed CircuitBreakerState = iota
+	Open
+	HalfOpen
 )
 
 type CircuitBreakerOptions struct {
-    Timeout          time.Duration
-    HalfOpenMaxCalls int
-    CheckHTTPCodes   []int
-    CheckErrors      []error
+	Timeout          time.Duration
+	HalfOpenMaxCalls int
+	CheckHTTPCodes   []int
+	CheckErrors      []error
 }
 
 type CircuitBreaker struct {
-    failureThreshold int
-    failureRate     float64
-    lastFailure     time.Time
-    state          CircuitBreakerState
-    options        CircuitBreakerOptions
-    mutex          sync.RWMutex
-    keyMu          sync.Mutex
+	failureThreshold int
+	failureRate      float64
+	lastFailure      time.Time
+	state            CircuitBreakerState
+	options          CircuitBreakerOptions
+	mutex            sync.RWMutex
+	keyMu            sync.Mutex
 }
 
 func (cb *CircuitBreaker) isFailure(err error) bool {
@@ -208,8 +208,8 @@ func (cb *CircuitBreaker) isFailure(err error) bool {
 }
 
 func (cb *CircuitBreaker) Check(err error) bool {
-	cb.mutex.RLock()
-	defer cb.mutex.RUnlock()
+	cb.mutex.Lock()
+	defer cb.mutex.Unlock()
 
 	if cb.state == Closed {
 		if err != nil && cb.isFailure(err) {

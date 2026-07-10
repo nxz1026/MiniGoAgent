@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"MiniGoAgent/tools/filter"
@@ -76,19 +75,21 @@ func isAdmin() bool {
 }
 
 func runElevated(ctx context.Context, command string) (string, error) {
-	tmpFile := filepath.Join(os.TempDir(), "elevated_out.txt")
+	tmpFile, err := os.CreateTemp("", "elevated_*.txt")
+	if err != nil {
+		return "", fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
 	psCmd := fmt.Sprintf(
 		`Start-Process cmd -Verb RunAs -ArgumentList '/c,%s > "%s" 2>&1' -Wait -WindowStyle Hidden`,
 		strings.ReplaceAll(command, `"`, `\"`),
-		tmpFile,
+		tmpFile.Name(),
 	)
-	_, err := runCmd(ctx, "powershell", "-NoProfile", "-Command", psCmd)
+	_, err = runCmd(ctx, "powershell", "-NoProfile", "-Command", psCmd)
 	if err != nil {
-		os.Remove(tmpFile)
 		return "", err
 	}
-	out, err := os.ReadFile(tmpFile)
-	os.Remove(tmpFile)
+	out, err := os.ReadFile(tmpFile.Name())
 	if err != nil {
 		return "", fmt.Errorf("提权成功但读取输出失败: %w", err)
 	}

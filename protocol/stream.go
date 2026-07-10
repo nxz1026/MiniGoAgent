@@ -54,6 +54,8 @@ func (eb *EventBus) Publish(ctx context.Context, chunk Chunk) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	default:
+		return nil
 	}
 }
 

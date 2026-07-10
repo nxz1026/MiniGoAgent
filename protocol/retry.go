@@ -74,7 +74,7 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 
 func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 	newReq func(context.Context) (*http.Request, error)) (*http.Response, error) {
-		
+
 	var lastErr error
 	var retryAfter time.Duration
 	notify, _ := ctx.Value(CtxRetryNotify).(func(attempt, max int))
@@ -135,7 +135,7 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 				nextBreaker.Success()
 			}
 			return nil, &AuthError{Vendor: vendor, Status: resp.StatusCode, HasKey: true}
-			}
+		}
 		apiErr := &APIError{Vendor: vendor, Status: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
 		if !retryableStatus(resp.StatusCode) {
 			return nil, apiErr

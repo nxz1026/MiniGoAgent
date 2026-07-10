@@ -33,6 +33,10 @@ func ValidateBaseURL(rawURL string) error {
 	return nil
 }
 
+func IsPrivateHost(host string) bool {
+	return isPrivateHost(host)
+}
+
 func isPrivateHost(host string) bool {
 	ip := net.ParseIP(host)
 	if ip == nil {

@@ -28,7 +28,8 @@ type OpenAIConfig struct {
 }
 
 type ServerConfig struct {
-	Port string
+	Port          string
+	WorkspaceRoot string
 }
 
 type AgentConfig struct {
@@ -68,7 +69,8 @@ func Load() Config {
 			RateLimitTPM:    GetEnvInt("RATE_LIMIT_TPM", 0),
 		},
 		Server: ServerConfig{
-			Port: GetEnv("PORT", "8080"),
+			Port:          GetEnv("PORT", "8080"),
+			WorkspaceRoot: GetEnv("WORKSPACE_ROOT", "."),
 		},
 		Agent: AgentConfig{
 			MaxStep:            GetEnvInt("AGENT_MAX_STEP", 12),

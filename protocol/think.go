@@ -5,15 +5,15 @@ import "strings"
 type thinkState int
 
 const (
-	thinkProbe     thinkState = iota
+	thinkProbe thinkState = iota
 	thinkInside
 	thinkPassthrough
 )
 
 type thinkSplitter struct {
-	state  thinkState
-	buf    strings.Builder
-	depth  int
+	state thinkState
+	buf   strings.Builder
+	depth int
 }
 
 func (s *thinkSplitter) push(text string) (thought, visible string) {

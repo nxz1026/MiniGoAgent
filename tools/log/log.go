@@ -30,10 +30,10 @@ var levelNames = map[Level]string{
 }
 
 type fileWriter struct {
-	dir       string
-	file      *os.File
-	mu        sync.Mutex
-	currDate  string
+	dir      string
+	file     *os.File
+	mu       sync.Mutex
+	currDate string
 }
 
 func (w *fileWriter) Write(p []byte) (int, error) {

@@ -9,6 +9,31 @@ import (
 	"strings"
 )
 
+var workspaceRoot string
+
+func SetWorkspaceRoot(root string) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	workspaceRoot = filepath.Clean(abs)
+}
+
+func ValidatePath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	cleaned := filepath.Clean(abs)
+	if workspaceRoot != "" && !strings.HasPrefix(cleaned, workspaceRoot) {
+		return "", fmt.Errorf("path %s is outside workspace root %s", cleaned, workspaceRoot)
+	}
+	return cleaned, nil
+}
+
 type ReadFileInput struct {
 	Path   string `json:"path" jsonschema:"required" jsonschema_description:"文件路径"`
 	Offset int    `json:"offset" jsonschema_description:"起始行号（从1开始，默认1）"`
@@ -16,7 +41,11 @@ type ReadFileInput struct {
 }
 
 func ReadFile(ctx context.Context, input ReadFileInput) (string, error) {
-	data, err := os.ReadFile(input.Path)
+	path, err := ValidatePath(input.Path)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("读取文件失败: %w", err)
 	}
@@ -46,14 +75,18 @@ type WriteFileInput struct {
 }
 
 func WriteFile(ctx context.Context, input WriteFileInput) (string, error) {
-	dir := filepath.Dir(input.Path)
+	path, err := ValidatePath(input.Path)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("创建目录失败: %w", err)
 	}
-	if err := os.WriteFile(input.Path, []byte(input.Content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(input.Content), 0644); err != nil {
 		return "", fmt.Errorf("写入文件失败: %w", err)
 	}
-	return fmt.Sprintf("已写入 %d 字节到 %s", len(input.Content), input.Path), nil
+	return fmt.Sprintf("已写入 %d 字节到 %s", len(input.Content), path), nil
 }
 
 type EditFileInput struct {
@@ -63,7 +96,11 @@ type EditFileInput struct {
 }
 
 func EditFile(ctx context.Context, input EditFileInput) (string, error) {
-	data, err := os.ReadFile(input.Path)
+	path, err := ValidatePath(input.Path)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("读取文件失败: %w", err)
 	}
@@ -88,6 +125,10 @@ func GlobFiles(ctx context.Context, input GlobInput) (string, error) {
 	root := input.Root
 	if root == "" {
 		root = "."
+	}
+	root, err := ValidatePath(root)
+	if err != nil {
+		return "", err
 	}
 	matches, err := filepath.Glob(filepath.Join(root, input.Pattern))
 	if err != nil {
@@ -115,6 +156,10 @@ func GrepFiles(ctx context.Context, input GrepInput) (string, error) {
 	root := input.Root
 	if root == "" {
 		root = "."
+	}
+	root, err := ValidatePath(root)
+	if err != nil {
+		return "", err
 	}
 	re, err := regexp.Compile(input.Pattern)
 	if err != nil {

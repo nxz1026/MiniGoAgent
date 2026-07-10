@@ -99,7 +99,10 @@ func (r *Runner) Run(ctx context.Context, req *adktypes.Request) (*adktypes.Resp
 
 	if r.store != nil && req.SessionID != "" {
 		existing, _ := r.store.Get(ctx, req.SessionID)
-		req.Messages = append(existing, req.Messages...)
+		messages := make([]*adktypes.Message, 0, len(existing)+len(req.Messages))
+		messages = append(messages, existing...)
+		messages = append(messages, req.Messages...)
+		req.Messages = messages
 	}
 
 	r.publishEvent(ctx, event.AgentStart, &event.AgentStartData{
@@ -175,7 +178,10 @@ func (r *Runner) Stream(ctx context.Context, req *adktypes.Request) (<-chan adkt
 
 	if r.store != nil && req.SessionID != "" {
 		existing, _ := r.store.Get(ctx, req.SessionID)
-		req.Messages = append(existing, req.Messages...)
+		messages := make([]*adktypes.Message, 0, len(existing)+len(req.Messages))
+		messages = append(messages, existing...)
+		messages = append(messages, req.Messages...)
+		req.Messages = messages
 	}
 
 	r.publishEvent(ctx, event.AgentStart, &event.AgentStartData{

@@ -17,11 +17,11 @@ const (
 )
 
 var (
-	reBuildLog = regexp.MustCompile(`(?m)^\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}`)
-	reSearch   = regexp.MustCompile(`(?m)^\d+\.\s+.+`)
-	reGitDiff  = regexp.MustCompile(`(?m)^(diff --git|@@ |--- |\+\+\+ )`)
-	reLogLevel = regexp.MustCompile(`(?im)^(DEBUG|INFO|WARN|ERROR|FATAL|TRACE)\b`)
-	reURL      = regexp.MustCompile(`(?m)^\s+URL:\s*https?://`)
+	reBuildLog   = regexp.MustCompile(`(?m)^\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}`)
+	reSearch     = regexp.MustCompile(`(?m)^\d+\.\s+.+`)
+	reGitDiff    = regexp.MustCompile(`(?m)^(diff --git|@@ |--- |\+\+\+ )`)
+	reLogLevel   = regexp.MustCompile(`(?im)^(DEBUG|INFO|WARN|ERROR|FATAL|TRACE)\b`)
+	reURL        = regexp.MustCompile(`(?m)^\s+URL:\s*https?://`)
 	reANSIEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 )
 

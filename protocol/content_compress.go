@@ -51,7 +51,7 @@ func CachedCompressContent(content string, ct ContentType) string {
 }
 
 var (
-	reTimestamp = regexp.MustCompile(`^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?\s+`)
+	reTimestamp  = regexp.MustCompile(`^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?\s+`)
 	reHunkHeader = regexp.MustCompile(`^@@ -\d+,\d+ +\+\d+,\d+ @@`)
 	reBlanks     = regexp.MustCompile(`\n{3,}`)
 	reTrailingWS = regexp.MustCompile(`[ \t]+\n`)

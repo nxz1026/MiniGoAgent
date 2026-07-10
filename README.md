@@ -20,6 +20,8 @@ Minimal LLM Agent powered by Go + [eino](https://github.com/cloudwego/eino) — 
 - Circuit breaker: per-vendor failure isolation and auto-recovery
 - SSRF protection: blocks localhost/LAN/private IPs by default (ALLOW_PRIVATE_URLS=true to override)
 - Secret redaction: logs and raw output redact API keys, tokens, passwords
+- Workspace sandbox: file tools (read/write/edit/glob/grep) restricted to WORKSPACE_ROOT (default `.`)
+- Image SSRF protection: fetchImage rejects private/internal URLs unless ALLOW_PRIVATE_IMAGE_URLS=true
 - Model failover: primary model falls back to OPENAI_FALLBACK_MODEL on persistent errors
 - Raw HTTP logging: enable with RAW_LOG=1, writes to logs/raw/ (JSONL)
 - Usage analytics: enable with USAGE_DB=1, writes to logs/raw/usage.db
@@ -78,6 +80,8 @@ docker run -p 8080:8080 \
 | `CONTEXT_COMPRESS_PCT` | `50` | Context compression signal (%) |
 | `AGENT_MAX_STEP` | `12` | Max ReAct agent loop steps |
 | `ALLOW_PRIVATE_URLS` | `false` | Allow localhost/LAN URLs (security risk) |
+| `ALLOW_PRIVATE_IMAGE_URLS` | `false` | Allow private/internal image URLs in vision tool (security risk) |
+| `WORKSPACE_ROOT` | `.` | Workspace root for file tools (ReadFile/WriteFile/EditFile/GlobFiles/GrepFiles) |
 | `RAW_LOG` | `0` | Enable raw HTTP logging (1=on) |
 | `RAW_LOG_DIR` | `logs/raw` | Raw log directory |
 | `USAGE_DB` | `0` | Enable SQLite usage analytics and local-only MCP endpoint |
@@ -113,6 +117,8 @@ See [README.detail.md](README.detail.md) for architecture, protocol layer, proje
 - 断路器：按供应商故障隔离 + 自动恢复
 - SSRF 防护：默认阻止 localhost/LAN/私有 IP（ALLOW_PRIVATE_URLS=true 关闭）
 - Secret 脱敏：日志和原始输出自动脱敏 API key/token/password
+- 工作区沙箱：文件工具（读写编辑/Glob/Grep）限制在 WORKSPACE_ROOT 内（默认 `.`）
+- 图片 SSRF 防护：fetchImage 拒绝内网/私有 URL（ALLOW_PRIVATE_IMAGE_URLS=true 放行）
 - 模型级 Failover：主模型持续失败时切换到 OPENAI_FALLBACK_MODEL
 - Raw HTTP 日志：RAW_LOG=1 启用，写入 logs/raw/（JSONL）
 - Usage 分析：USAGE_DB=1 启用，写入 logs/raw/usage.db
@@ -160,6 +166,8 @@ docker run -p 8080:8080 \
 | `OPENAI_FALLBACK_MODEL` | — | 故障转移模型 |
 | `OPENAI_FALLBACK_BASE_URL` | — | 故障转移 API 地址 |
 | `ALLOW_PRIVATE_URLS` | `false` | 允许 localhost/LAN URL（安全风险） |
+| `ALLOW_PRIVATE_IMAGE_URLS` | `false` | 允许 vision 工具访问私有/内网图片 URL（安全风险） |
+| `WORKSPACE_ROOT` | `.` | 文件工具工作区根目录（ReadFile/WriteFile/EditFile/GlobFiles/GrepFiles） |
 | `RAW_LOG` | `0` | 启用原始 HTTP 日志（1=开启） |
 | `RAW_LOG_DIR` | `logs/raw` | 原始日志目录 |
 | `USAGE_DB` | `0` | 启用 SQLite 用量分析和本机限定 MCP 端点 |

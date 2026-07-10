@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -100,8 +101,16 @@ func RunVision(ctx context.Context, input VisionInput) (string, error) {
 	return result.Choices[0].Message.Content, nil
 }
 
-func fetchImage(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func fetchImage(ctx context.Context, rawURL string) ([]byte, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid image URL: %w", err)
+	}
+	host := u.Hostname()
+	if host != "" && protocol.IsPrivateHost(host) && !strings.EqualFold(os.Getenv("ALLOW_PRIVATE_IMAGE_URLS"), "true") {
+		return nil, fmt.Errorf("image URL points to private/internal address (set ALLOW_PRIVATE_IMAGE_URLS=true to override)")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}

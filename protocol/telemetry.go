@@ -108,10 +108,7 @@ func (t *Telemetry) record(sessionID, model, vendor string, durSec float64, usag
 }
 
 func (t *Telemetry) RecordFromContext(ctx context.Context, model, vendor string, durSec float64, usage *Usage) (warn, compress bool) {
-	sid := ""
-	if sid, ok := ctx.Value(CtxSessionID).(string); ok && sid != "" {
-		return t.record(sid, model, vendor, durSec, usage)
-	}
+	sid, _ := ctx.Value(CtxSessionID).(string)
 	return t.record(sid, model, vendor, durSec, usage)
 }
 

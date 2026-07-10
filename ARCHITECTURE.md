@@ -160,6 +160,7 @@ These are already implemented and must be preserved during future refactors.
 - HTTP retry with exponential backoff, jitter, and `Retry-After`: `protocol/retry.go`.
 - Stream reconnect before token emission: `protocol/openai.go`.
 - Typed stream interruption after token emission: `StreamInterruptedError` in `protocol/types.go`.
+- Circuit breaker concurrency safety: `CircuitBreaker.Check()` uses exclusive `Lock()` for state writes, eliminating data race under `RLock()`.
 - Per-vendor circuit breaker: `CircuitBreaker` and `vendorCircuitBreaker`.
 - Health checking: `HealthChecker` / `HealthManager`.
 - RPM/TPM token bucket rate limiting: `protocol/ratelimit.go`.
@@ -167,6 +168,9 @@ These are already implemented and must be preserved during future refactors.
 - SSRF defense for provider base URLs: `ValidateBaseURL()`.
 - Proxy scheme validation: `ValidateProxyEnv()`.
 - Secret redaction in strings, URLs, headers, and bodies: `protocol/redact.go`.
+- Workspace root path validation: `tools/fileops.go` `ValidatePath` enforces `WORKSPACE_ROOT` boundary for ReadFile/WriteFile/EditFile/GlobFiles/GrepFiles; `internal/server/server.go` `extractLocalImagePath` also validated.
+- SSRF defense for image fetch URLs: `tools/vision.go` `fetchImage` rejects private/internal hosts unless `ALLOW_PRIVATE_IMAGE_URLS=true`.
+- Secure temp file handling: `tools/terminal.go` `runElevated` uses `os.CreateTemp` with random suffix and deferred cleanup.
 
 ### 5.5 Observability and Query Optimizations
 
@@ -178,6 +182,7 @@ These are already implemented and must be preserved during future refactors.
 - Structured RAW query API: `protocol/raw_query.go` for daily/model/vendor stats.
 - Local-only MCP WebSocket query endpoint: `protocol/mcp_server.go`, mounted at `/mcp` when `USAGE_DB=1`.
 - Lifecycle hooks: `BeforeProcess`, `AfterProcess`, `OnError` in `protocol/hooks.go`.
+- `RecordFromContext` simplifies session-aware telemetry recording with direct context extraction.
 
 ### 5.6 Efficiency Optimizations
 
@@ -186,6 +191,7 @@ These are already implemented and must be preserved during future refactors.
 - Vision and compression tools reuse protocol HTTP transport.
 - Tool/schema sorting and schema key canonicalization reduce diff/cache noise.
 - Tool sanitization fills empty names/descriptions before provider calls.
+- Secure elevated command temp files: `tools/terminal.go` uses `os.CreateTemp` with random suffix to prevent symlink attacks.
 
 ---
 
@@ -281,6 +287,8 @@ First implementation should prefer offline Python scripts over a mandatory alway
 - `reference/eino` is a local replace dependency and currently appears as an abnormal/untracked git status item in this workspace.
 - README and MEMO are append-heavy and can contain old counts in earlier sections; latest sections are authoritative.
 - Some integration behavior depends on external provider compatibility and is not covered by network-free tests.
+- `EventBus.Publish` drops events when subscriber channels are full; telemetry/log gaps may occur under high load.
+- `internal/adk/tool/registry.go` `Check()` TOCTOU race mitigated by holding `r.mu.RLock()` during `t.Check(ctx)`, but still subject to cache stampede under extreme concurrency.
 
 ---
 
@@ -295,6 +303,11 @@ Completed:
 - EventBus — `Runner` publishes `AgentStart`/`AgentEnd`/`Error` lifecycle events; handlers run panic-isolated (each wrapped in `recover`)
 - Session `Store` — `Runner` auto-loads history and appends responses when `SessionID` is set
 - Guardrails — checked at two layers: (1) `Runner.Run`/`Runner.Stream` entry checks request tool calls; (2) `middlewareWrappedTool.InvokableRun` checks each tool call the agent produces at runtime (blocks denied tools before execution)
+- Security hardening — workspace root path validation (`WORKSPACE_ROOT`) enforced in `tools/fileops.go` and `internal/server/server.go`; `tools/vision.go` `fetchImage` rejects private/internal URLs unless `ALLOW_PRIVATE_IMAGE_URLS=true`; `tools/terminal.go` `runElevated` uses `os.CreateTemp` random temp files
+- Graceful shutdown — `main.go` uses `http.Server.Shutdown()` with 10s timeout on SIGINT/SIGTERM; `bus.Stop()` removed (ADK event.Bus does not require explicit stop)
+- Concurrency safety — `protocol/types.go` `CircuitBreaker.Check()` uses exclusive `Lock()` for state mutations; `protocol/stream.go` `Publish` uses non-blocking send to prevent producer backpressure
+- Session message isolation — `internal/adk/runner.go` `Run`/`Stream` allocate new message slice instead of mutating caller's `req.Messages`
+- Telemetry simplification — `protocol/telemetry.go` `RecordFromContext` streamlined to direct context extraction without redundant branching
 
 **Stream 中间件限制**: `Runner.Stream` 只执行 middleware 的 `BeforeModel` 钩子（通过 `Chain.BeforeModelChain`）。`AfterModel` 需要完整的模型响应对象才能运作，而流式响应是消费时逐块产生的增量数据，无法在返回时提供，故不在流式路径执行。需要观测/改写完整响应的中间件应作用于非流式 `Run` 路径。`AgentEnd` 事件通过 `defer` 在流 goroutine 退出时兜底发布，保证与 `AgentStart` 配对（即使消费方提前断开或 ctx 取消）。
 

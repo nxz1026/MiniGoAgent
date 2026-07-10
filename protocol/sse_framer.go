@@ -38,9 +38,9 @@ type SseEvent struct {
 }
 
 type SseFramer struct {
-	buf     bytes.Buffer
-	done    bool
-	idle    int
+	buf  bytes.Buffer
+	done bool
+	idle int
 }
 
 func NewSseFramer() *SseFramer {

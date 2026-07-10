@@ -47,6 +47,9 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 - **Tool Sanitization** — `sanitizeTool()` assigns fallback name/description when empty, preventing API 400 errors
 - **Vision/Compress Shared Transport** — Both tools reuse `protocol.DefaultTransport` instead of creating per-call `http.Client`
 - **SSRF Protection** — `ValidateBaseURL()` rejects localhost/LAN/private IPs by default; `ALLOW_PRIVATE_URLS=true` overrides; `ValidateProxyEnv()` checks proxy scheme
+- **Workspace Sandbox** — `tools/fileops.go` `ValidatePath` enforces `WORKSPACE_ROOT` boundary; ReadFile/WriteFile/EditFile/GlobFiles/GrepFiles all validated
+- **Image SSRF Protection** — `tools/vision.go` `fetchImage` rejects private/internal hosts unless `ALLOW_PRIVATE_IMAGE_URLS=true`
+- **Secure Temp Files** — `tools/terminal.go` `runElevated` uses `os.CreateTemp` with random suffix and deferred cleanup
 - **Secret Redaction** — `RedactString`/`RedactHeaders`/`RedactBody`/`RedactURL` mask API keys, tokens, passwords in logs and output
 - **Model Failover** — `FailoverConfig` switches to `OPENAI_FALLBACK_MODEL` after retry exhaustion; supports both Chat and Stream
 - **Raw HTTP Logging** — `RawLogProcessor` + `ChunkRaw*` events emit request/response/error JSONL to `logs/raw/` via `EventBus.TryPublish`

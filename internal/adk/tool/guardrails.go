@@ -21,11 +21,11 @@ type GuardrailResult struct {
 type GuardrailRule func(ctx context.Context, toolName string, args any) GuardrailResult
 
 type Guardrails struct {
-	mu           sync.RWMutex
-	allowList    map[string]bool
-	denyList     map[string]bool
-	rules        []GuardrailRule
-	registry     *ToolRegistry
+	mu        sync.RWMutex
+	allowList map[string]bool
+	denyList  map[string]bool
+	rules     []GuardrailRule
+	registry  *ToolRegistry
 }
 
 func NewGuardrails(registry *ToolRegistry) *Guardrails {

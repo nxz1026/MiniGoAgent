@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 
@@ -90,6 +91,7 @@ func (a *agentAdapter) Stream(ctx context.Context, msgs []*schema.Message) (*sch
 func main() {
 	cfg := config.Load()
 	ctx := context.Background()
+	tools.SetWorkspaceRoot(cfg.Server.WorkspaceRoot)
 
 	apiKey := cfg.OpenAI.APIKey
 	baseURL := cfg.OpenAI.BaseURL
@@ -152,6 +154,7 @@ func main() {
 		ToolNames: toolNames,
 		Prompt:    systemPrompt,
 		MaxSteps:  cfg.Agent.MaxStep,
+		// Middleware 和 Guardrails 默认 nil，不启用；如需启用需显式配置
 	})
 	if err != nil {
 		log.Fatal("创建 Agent 失败: %v", err)
@@ -179,6 +182,8 @@ func main() {
 	port := cfg.Server.Port
 	log.Info("MiniGoAgent UI: http://localhost:%s", port)
 
+	httpSrv := &http.Server{Addr: ":" + port, Handler: nil}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -191,10 +196,12 @@ func main() {
 				log.Warn("关闭 Usage 数据库失败: %v", err)
 			}
 		}
-		os.Exit(0)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal("HTTP server error: %v", err)
 	}
 }

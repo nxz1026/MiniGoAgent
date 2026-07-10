@@ -1,8 +1,8 @@
 package protocol
 
 type FailoverConfig struct {
-	MaxRetries     int
-	ShouldFailover func(model, vendor string, err error) bool
+	MaxRetries       int
+	ShouldFailover   func(model, vendor string, err error) bool
 	GetFailoverModel func(model, vendor string) (string, string, bool)
 }
 

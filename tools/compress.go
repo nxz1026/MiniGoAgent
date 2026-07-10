@@ -15,8 +15,8 @@ import (
 )
 
 type CompressInput struct {
-	Content      string `json:"content" jsonschema:"required" jsonschema_description:"需要压缩的长文本内容"`
-	Instruction  string `json:"instruction" jsonschema_description:"自定义压缩要求，留空则默认保留关键信息"`
+	Content     string `json:"content" jsonschema:"required" jsonschema_description:"需要压缩的长文本内容"`
+	Instruction string `json:"instruction" jsonschema_description:"自定义压缩要求，留空则默认保留关键信息"`
 }
 
 func RunCompress(ctx context.Context, input CompressInput) (string, error) {
