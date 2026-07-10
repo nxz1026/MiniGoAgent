@@ -25,6 +25,26 @@ import (
 //go:embed frontend/index.html
 var frontendFS embed.FS
 
+const systemPrompt = "你是密米尔，一个沉稳睿智的 AI 助手。思考步骤和调用工具时使用中文，但在输出最终回答时，请结合用户提问所使用的语言（中文或英文），使用对应的语言输出。不要同时输出中英文混合的内容。"
+
+type promptProvider struct{}
+
+func (p *promptProvider) SystemPrompt() string {
+	return systemPrompt
+}
+
+type agentAdapter struct {
+	agent *react.Agent
+}
+
+func (a *agentAdapter) Generate(ctx context.Context, msgs []*schema.Message) (*schema.Message, error) {
+	return a.agent.Generate(ctx, msgs)
+}
+
+func (a *agentAdapter) Stream(ctx context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+	return a.agent.Stream(ctx, msgs)
+}
+
 func main() {
 	cfg := config.Load()
 	ctx := context.Background()
@@ -93,6 +113,7 @@ func main() {
 	grepTool, _ := utils.InferTool("grep", "在文件中搜索文本", tools.GrepFiles)
 	visionTool, _ := utils.InferTool("vision", "分析图片内容，支持URL和base64 data URI", tools.RunVision)
 
+	pp := &promptProvider{}
 	agent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel:   llm,
 		ToolsConfig:        compose.ToolsNodeConfig{Tools: []tool.BaseTool{terminalTool, searchTool, compressTool, readFileTool, writeFileTool, editFileTool, globTool, grepTool, visionTool}},
@@ -105,8 +126,7 @@ func main() {
 			return msgs[len(msgs)-6:]
 		},
 		MessageModifier: func(ctx context.Context, input []*schema.Message) []*schema.Message {
-			return append([]*schema.Message{schema.SystemMessage(
-				"你是密米尔，一个沉稳睿智的 AI 助手。思考步骤和调用工具时使用中文，但在输出最终回答时，请结合用户提问所使用的语言（中文或英文），使用对应的语言输出。不要同时输出中英文混合的内容。")}, input...)
+			return append([]*schema.Message{schema.SystemMessage(pp.SystemPrompt())}, input...)
 		},
 	})
 	if err != nil {
@@ -117,7 +137,7 @@ func main() {
 	if err != nil {
 		log.Fatal("读取前端文件失败: %v", err)
 	}
-	srv := server.New(agent, llm, appsession.NewManager("default"), frontendData)
+	srv := server.New(&agentAdapter{agent: agent}, llm, appsession.NewManager("default"), frontendData, pp)
 	srv.LoadHistory()
 	http.HandleFunc("/", srv.ServeFrontend)
 	http.HandleFunc("/api/chat", srv.HandleChat)

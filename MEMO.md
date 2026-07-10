@@ -497,3 +497,12 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 141. `main_test.go`：删除（所有测试已迁移至 `internal/server/server_test.go`）
 142. `ARCHITECTURE.md`：表 main.go 行改为 "thin wiring layer"；新增 `internal/server` 行；Sec 6 移除 "Serve HTTP and SSE endpoints"；Sec 10 更新 main.go 债务描述；Sec 11 将 server/AgentRunner/PromptProvider 移至 "Completed steps"
 143. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 通过（MiniGoAgent / internal/config / internal/server / internal/session / protocol / tools 全部 ok）；`go vet ./...` 通过
+
+### 第二十二轮（2026-07-10）：长期架构重构 Phase 1.4 — AgentRunner/PromptProvider 接口落地
+
+144. `internal/server/server.go`：`Server.agent` 类型从 `*react.Agent` 改为 `AgentRunner` 接口；`New()` 签名更新
+145. `main.go`：新增 `agentAdapter` 类型适配 `*react.Agent` → `AgentRunner`；`server.New()` 调用处传入 `&agentAdapter{agent: agent}`
+146. `main.go`：新增 `promptProvider` 类型实现 `server.PromptProvider`；system prompt 提取为顶层 `const systemPrompt`；`react.AgentConfig.MessageModifier` 改为调用 `pp.SystemPrompt()` 而非硬编码字符串；`server.New()` 调用处传入 `pp`
+147. `internal/server/server.go`：`Server` 新增 `prompt PromptProvider` 字段，`New()` 增加 `prompt PromptProvider` 参数
+148. `ARCHITECTURE.md`：Sec 11 将 AgentRunner/PromptProvider 移至 "Completed steps"，Allowed next steps 清空
+149. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 通过（MiniGoAgent / internal/config / internal/server / internal/session / protocol / tools 全部 ok）；`go vet ./...` 通过

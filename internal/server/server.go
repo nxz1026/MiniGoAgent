@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
 	"MiniGoAgent/internal/session"
@@ -23,10 +22,11 @@ import (
 )
 
 type Server struct {
-	agent    *react.Agent
+	agent    AgentRunner
 	llm      *ChatModel
 	sessions *session.Manager
 	frontend []byte
+	prompt   PromptProvider
 }
 
 type chatReq struct {
@@ -43,8 +43,8 @@ type visionReq struct {
 	Prompt string `json:"prompt"`
 }
 
-func New(agent *react.Agent, llm *ChatModel, mgr *session.Manager, frontendHTML []byte) *Server {
-	return &Server{agent: agent, llm: llm, sessions: mgr, frontend: frontendHTML}
+func New(agent AgentRunner, llm *ChatModel, mgr *session.Manager, frontendHTML []byte, prompt PromptProvider) *Server {
+	return &Server{agent: agent, llm: llm, sessions: mgr, frontend: frontendHTML, prompt: prompt}
 }
 
 func (s *Server) SaveHistory() {

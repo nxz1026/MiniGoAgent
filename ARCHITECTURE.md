@@ -290,12 +290,12 @@ Completed steps:
 
 - `internal/session` — session state, snapshot/append, JSON history persistence extracted from `main.go`.
 - `internal/server` — HTTP handlers, SSE streaming, ChatModel adapter, vision helpers extracted from `main.go`.
-- `AgentRunner` and `PromptProvider` interfaces defined in `internal/server`.
+- `AgentRunner` — `*react.Agent` replaced with interface in `Server`; adapter in `main.go`.
+- `PromptProvider` — wired into `main.go` and `Server` constructor; system prompt no longer hardcoded inline in `MessageModifier`.
 
 Allowed next steps:
 
-- Replace `*react.Agent` usage with `AgentRunner` interface in `Server`.
-- Wire `PromptProvider` into `Server` for configurable system prompts.
+- (Currently no high-priority guardrail items remain; next architecture work depends on feature needs.)
 
 Do not do yet:
 
