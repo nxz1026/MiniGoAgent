@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 type ChunkProcessor interface {
@@ -17,7 +18,7 @@ type EventBus struct {
 	mu        sync.RWMutex
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
-	stopped   bool
+	stopped   atomic.Bool
 }
 
 func NewEventBus(ctx context.Context, bufferSize int) *EventBus {
@@ -46,7 +47,7 @@ func (eb *EventBus) Subscribe(name string, p ChunkProcessor) error {
 func (eb *EventBus) Publish(ctx context.Context, chunk Chunk) error {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
-	if eb.stopped {
+	if eb.stopped.Load() {
 		return fmt.Errorf("event bus stopped")
 	}
 	select {
@@ -62,7 +63,7 @@ func (eb *EventBus) Publish(ctx context.Context, chunk Chunk) error {
 func (eb *EventBus) TryPublish(chunk Chunk) bool {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
-	if eb.stopped {
+	if eb.stopped.Load() {
 		return false
 	}
 	select {
@@ -76,7 +77,7 @@ func (eb *EventBus) TryPublish(chunk Chunk) bool {
 func (eb *EventBus) Stop() {
 	eb.stopOnce.Do(func() {
 		eb.mu.Lock()
-		eb.stopped = true
+		eb.stopped.Store(true)
 		close(eb.publisher)
 		for name, ch := range eb.subs {
 			close(ch)

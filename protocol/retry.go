@@ -10,11 +10,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
-var vendorCircuitBreaker = make(map[Vendor]*CircuitBreaker)
+var vendorCircuitBreaker sync.Map
 var vendorHealthManager = NewHealthManager(context.Background())
 
 func retryableStatus(s int) bool {
@@ -99,8 +100,8 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 			}
 		}
 
-		if nextBreaker := vendorCircuitBreaker[vendor]; nextBreaker != nil {
-			if !nextBreaker.Check(nil) {
+		if val, ok := vendorCircuitBreaker.Load(vendor); ok {
+			if nextBreaker := val.(*CircuitBreaker); !nextBreaker.Check(nil) {
 				return nil, fmt.Errorf("circuit breaker open for vendor %v", vendor)
 			}
 		}
@@ -114,8 +115,8 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 			if !transientErr(err) {
 				return nil, fmt.Errorf("request failed: %w", err)
 			}
-			if nextBreaker := vendorCircuitBreaker[vendor]; nextBreaker != nil {
-				nextBreaker.Check(err)
+			if val, ok := vendorCircuitBreaker.Load(vendor); ok {
+				val.(*CircuitBreaker).Check(err)
 			}
 			lastErr = fmt.Errorf("request failed: %w", err)
 			continue
@@ -130,9 +131,8 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 		resp.Body.Close()
 
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			nextBreaker := vendorCircuitBreaker[vendor]
-			if nextBreaker != nil {
-				nextBreaker.Success()
+			if val, ok := vendorCircuitBreaker.Load(vendor); ok {
+				val.(*CircuitBreaker).Success()
 			}
 			return nil, &AuthError{Vendor: vendor, Status: resp.StatusCode, HasKey: true}
 		}
@@ -140,8 +140,8 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 		if !retryableStatus(resp.StatusCode) {
 			return nil, apiErr
 		}
-		if nextBreaker := vendorCircuitBreaker[vendor]; nextBreaker != nil {
-			nextBreaker.Check(apiErr)
+		if val, ok := vendorCircuitBreaker.Load(vendor); ok {
+			val.(*CircuitBreaker).Check(apiErr)
 		}
 		lastErr = apiErr
 	}

@@ -18,7 +18,7 @@ import (
 
 func init() {
 	Register("openai", func(cfg Config) (Protocol, error) {
-		return NewOpenAI(cfg), nil
+		return NewOpenAI(cfg)
 	})
 }
 
@@ -79,11 +79,10 @@ func defaultHTTPClient(timeout time.Duration) *http.Client {
 	return NewHTTPClient(timeout)
 }
 
-func NewOpenAI(cfg Config) *OpenAI {
+func NewOpenAI(cfg Config) (*OpenAI, error) {
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
 	if err := ValidateBaseURL(baseURL); err != nil {
-		// log via internal error field; construction continues so callers can handle nil-check
-		// Most callers should call ValidateBaseURL explicitly before NewOpenAI
+		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 	apiKeys := cfg.APIKeys
 	if len(apiKeys) == 0 && cfg.APIKey != "" {
@@ -139,9 +138,13 @@ func NewOpenAI(cfg Config) *OpenAI {
 		healthURL = defaultHealthEndpoint(o.vendor, baseURL)
 	}
 	if healthURL != "" {
-		vendorHealthManager.Register(o.vendor, healthURL, 30*time.Second, vendorCircuitBreaker[o.vendor])
+		var cb *CircuitBreaker
+		if val, ok := vendorCircuitBreaker.Load(o.vendor); ok {
+			cb = val.(*CircuitBreaker)
+		}
+		vendorHealthManager.Register(o.vendor, healthURL, 30*time.Second, cb)
 	}
-	return o
+	return o, nil
 }
 
 func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
@@ -685,9 +688,7 @@ func (o *OpenAI) buildThinkingFields(m map[string]any) {
 
 // readStream uses bufio.Scanner (not SseFramer) because MiniGoAgent is an
 // HTTP client: net/http handles chunked transfer transparently and Scanner's
-// 64 KB internal buffer guarantees no line-level truncation. SseFramer in
-// sse_framer.go is available for raw-TCP proxy scenarios but is not needed
-// here — see that file for details and wiring instructions.
+// 64 KB internal buffer guarantees no line-level truncation.
 func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<- Chunk) (emitted bool, _ error) {
 	defer resp.Body.Close()
 

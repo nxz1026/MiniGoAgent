@@ -289,6 +289,24 @@ First implementation should prefer offline Python scripts over a mandatory alway
 - Some integration behavior depends on external provider compatibility and is not covered by network-free tests.
 - `EventBus.Publish` drops events when subscriber channels are full; telemetry/log gaps may occur under high load.
 - `internal/adk/tool/registry.go` `Check()` TOCTOU race mitigated by holding `r.mu.RLock()` during `t.Check(ctx)`, but still subject to cache stampede under extreme concurrency.
+- `compressCache` eviction deletes 50 entries at a time when over capacity — acceptable for current scale but lacks LRU/TTL for production workloads.
+- Session in-memory storage has TTL-based `Cleanup(maxAge)` but no automatic background eviction goroutine yet — callers must periodically invoke or sessions accumulate until restart.
+
+### Resolved in 2026-07-11 (Round 32)
+
+These were listed as debt in earlier versions and are now fixed:
+
+- `vendorCircuitBreaker` package-level map data race → `sync.Map` (`protocol/retry.go`)
+- `EventBus.stopped` data race (`RLock` read vs `Lock` write) → `atomic.Bool` (`protocol/stream.go`)
+- ToolExecutor panic crashed entire process → `safeRunOne` with recover (`internal/adk/tool/executor.go`)
+- Stream recovery error silently lost → `sw.Send(nil, err)` (`internal/server/chatmodel.go`)
+- ReactAgent.Stream Recv errors silently dropped → error event propagation (`internal/adk/react.go`)
+- `ValidateBaseURL` result ignored in `NewOpenAI` → returns error (`protocol/openai.go`)
+- `Chain.Use()` data race on `middlewares` slice → `sync.RWMutex` + copy-on-read (`internal/adk/middleware/chain.go`)
+- `safeInvoke` swallowed panics without trace → `log.Printf` (`internal/adk/event/bus.go`)
+- 10 JSON marshal / response read errors silently discarded → proper error handling across 5 files
+- `isPrivateIP` missed `0.0.0.0` (unspecified) → added `IsLoopback()`/`IsUnspecified()` check
+- `sse_framer.go` (271 lines of dead code, `//go:build never`) → deleted
 
 ---
 

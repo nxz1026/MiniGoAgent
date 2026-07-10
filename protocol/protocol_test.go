@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +16,10 @@ import (
 	"testing"
 	"time"
 )
+
+func init() {
+	os.Setenv("ALLOW_PRIVATE_URLS", "true")
+}
 
 func TestDetectVendor(t *testing.T) {
 	tests := []struct {
@@ -293,7 +298,7 @@ func TestMockStream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -318,7 +323,7 @@ func TestMockStreamReasoning(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "think step by step"}},
 	})
@@ -349,7 +354,7 @@ func TestMockStreamToolCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "weather"}},
 	})
@@ -379,7 +384,7 @@ func TestMockStreamReconnect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -415,7 +420,7 @@ func TestMockDisconnectNoRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -454,7 +459,7 @@ func TestMockChat(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	resp, err := p.Chat(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -543,7 +548,7 @@ func TestMockStreamError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	_, err := p.Chat(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -645,7 +650,7 @@ func TestStreamInterruptedError_MockStreamEmitThenDisconnect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -678,7 +683,7 @@ func TestStreamInterruptedError_MockStreamEmitThenAPIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -773,8 +778,8 @@ func TestSendWithRetry_CircuitBreakerIntegration(t *testing.T) {
 		failureRate:      1.0,
 		options:          CircuitBreakerOptions{Timeout: 5 * time.Minute},
 	}
-	vendorCircuitBreaker[VendorUnspecified] = cb
-	defer delete(vendorCircuitBreaker, VendorUnspecified)
+	vendorCircuitBreaker.Store(VendorUnspecified, cb)
+	defer vendorCircuitBreaker.Delete(VendorUnspecified)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)
@@ -801,8 +806,8 @@ func TestSendWithRetry_CircuitBreakerAuthSuccess(t *testing.T) {
 		state:            HalfOpen,
 		options:          CircuitBreakerOptions{Timeout: 5 * time.Minute},
 	}
-	vendorCircuitBreaker[VendorUnspecified] = cb
-	defer delete(vendorCircuitBreaker, VendorUnspecified)
+	vendorCircuitBreaker.Store(VendorUnspecified, cb)
+	defer vendorCircuitBreaker.Delete(VendorUnspecified)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
@@ -823,7 +828,7 @@ func TestSendWithRetry_CircuitBreakerAuthSuccess(t *testing.T) {
 }
 
 func TestBodyPoolReuse(t *testing.T) {
-	o := NewOpenAI(Config{APIKey: "k", BaseURL: "http://example.com/v1", Model: "m"})
+	o, _ := NewOpenAI(Config{APIKey: "k", BaseURL: "http://example.com/v1", Model: "m"})
 	req := Request{Messages: []Message{{Role: RoleUser, Content: "hello"}}}
 	first := o.buildBody(req, false)
 	second := o.buildBody(req, false)
@@ -1004,10 +1009,10 @@ func TestSendWithRetry_HealthShortCircuit(t *testing.T) {
 
 	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, state: HalfOpen, options: CircuitBreakerOptions{Timeout: time.Minute}}
 	vendorHealthManager = hm
-	vendorCircuitBreaker[VendorUnspecified] = cb
+	vendorCircuitBreaker.Store(VendorUnspecified, cb)
 	defer func() {
 		vendorHealthManager = NewHealthManager(context.Background())
-		delete(vendorCircuitBreaker, VendorUnspecified)
+		vendorCircuitBreaker.Delete(VendorUnspecified)
 	}()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1101,7 +1106,7 @@ func TestMockStream_DeepSeek(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "deepseek-chat"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "deepseek-chat"})
 	p.vendor = VendorDeepSeek
 	p.policy = reasoningThinking
 	ch, err := p.Stream(context.Background(), Request{
@@ -1137,7 +1142,7 @@ func TestMockStream_MiniMax(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "minimax/MiniMax-M1-80k"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "minimax/MiniMax-M1-80k"})
 	p.vendor = VendorMiniMax
 	p.policy = reasoningThinking
 	ch, err := p.Stream(context.Background(), Request{
@@ -1173,7 +1178,7 @@ func TestMockStream_Zhipu(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "glm-4"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "glm-4"})
 	p.vendor = VendorZhipu
 	p.policy = reasoningThinking
 	ch, err := p.Stream(context.Background(), Request{
@@ -1210,7 +1215,7 @@ func TestMockStream_LongCat(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "longcat-chat"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "longcat-chat"})
 	p.vendor = VendorLongCat
 	p.policy = reasoningThinking
 	ch, err := p.Stream(context.Background(), Request{
@@ -1246,7 +1251,7 @@ func TestMockStream_MiMo(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "mimo-chat"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "mimo-chat"})
 	p.vendor = VendorMiMo
 	p.policy = reasoningThinking
 	ch, err := p.Stream(context.Background(), Request{
@@ -1282,7 +1287,7 @@ func TestMockStream_OllamaCloud(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "llama3.1"})
+	p, _ := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "llama3.1"})
 	p.vendor = VendorOllamaCloud
 	p.policy = reasoningEffort
 	ch, err := p.Stream(context.Background(), Request{

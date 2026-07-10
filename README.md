@@ -27,6 +27,8 @@ Minimal LLM Agent powered by Go + [eino](https://github.com/cloudwego/eino) — 
 - Usage analytics: enable with USAGE_DB=1, writes to logs/raw/usage.db
 - Local-only MCP WebSocket: enabled with USAGE_DB=1 at ws://localhost:PORT/mcp
 - Layered architecture: `internal/adk/` agent runtime (tool registry, middleware, events, session) between HTTP handlers and protocol layer
+- Concurrency safety: data races in circuit breaker, event bus, and middleware chain fixed via `sync.Map`/`atomic`/`RWMutex`
+- Defense in depth: tool panic recovery prevents single bad tool from crashing the server
 
 ---
 

@@ -694,3 +694,45 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
     - `main.go`：`AgentConfig` 添加注释 `// Middleware 和 Guardrails 默认 nil，不启用；如需启用需显式配置`
 
 195. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（MiniGoAgent / internal/adk / internal/config / internal/server / internal/session / protocol / tools 全部 ok）；`go vet ./...` 通过
+
+---
+
+### 第三十二轮（2026-07-11）：Code Review 修复 — 数据竞争 + 安全性 + 错误处理
+
+196. **数据竞争修复（2 项）**：
+    - `protocol/retry.go`：`vendorCircuitBreaker` 包级 map 改为 `sync.Map`，消除 `SendWithRetry` 中的并发读写竞争；同步更新 `protocol/openai.go` 中读取处和 `protocol/protocol_test.go` 中 3 处测试写入
+    - `protocol/stream.go`：`EventBus.stopped` 字段从 `bool` 改为 `atomic.Bool`；`Publish`/`TryPublish` 用 `Load()`，`Stop()` 用 `Store()`，消除 RLock 读/Lock 写竞争
+
+197. **可用性修复（3 项）**：
+    - `internal/adk/tool/executor.go`：新增 `safeRunOne` 函数，在 `executeSequential` 和 `executeConcurrent` 两个路径都加了 defer/recover，工具 panic 不再导致进程崩溃，转为 `ToolResult{Failed: true, Err: ...}`
+    - `internal/server/chatmodel.go`：流式恢复 `forwardChat` 失败时，从静默 return 改为 `sw.Send(nil, err)` 将错误传播给消费者；同时修复恢复时 `resp.ToolCalls` 丢失问题，改用 `FromProtoResp(resp)` 发送完整响应
+    - `internal/adk/react.go`：`ReactAgent.Stream` goroutine 中 `sr.Recv()` 错误时，新增 error event 发送（带 `select ctx.Done()`），不再静默退出
+
+198. **安全性修复（3 项）**：
+    - `protocol/openai.go`：`NewOpenAI` 签名从 `*OpenAI` 改为 `(*OpenAI, error)`，`ValidateBaseURL` 失败时返回error 而非静默继续；factory 注册相应更新；`protocol_test.go` 和 `openai_integration_test.go` 同步适配
+    - `protocol/url_validator.go`：移除包级变量 `allowPrivateURLs`（init 时序导致无效），改为运行时 `os.Getenv` 检查；`isPrivateIP` 增加 `IsLoopback()`/`IsUnspecified()` 检查，修复 0.0.0.0 逃逸
+    - `protocol/content_compress.go`：compressCache 驱逐策略从"超阈值只删 1 条"改为"批量删除 50 条"，防止并发下缓存无界增长
+
+199. **内存管理（1 项）**：
+    - `internal/session/manager.go`：新增 `lastAccess` 跟踪 map 和 `Cleanup(maxAge time.Duration) int` 方法，支持 TTL 驱逐；`SnapshotWith` 和 `Append` 自动更新 access time
+
+200. **错误处理修复（10 处）**：
+    - `tools/websearch.go`：`json.Marshal` 和 `io.ReadAll` 错误从 `_` 忽略改为返回包装错误
+    - `tools/vision.go`：同上
+    - `tools/compress.go`：同上
+    - `internal/server/server.go`：3 处 SSE 路径 `json.Marshal` 错误从 `_` 忽略改为 log+skip/return
+    - `internal/server/chatmodel.go`：`StatsJSON` 中 `json.Marshal` 错误处理
+
+201. **并发安全 + 调试（2 项）**：
+    - `internal/adk/middleware/chain.go`：`Chain.Use()` 加 `sync.RWMutex`，`AroundModel`/`AroundTool`/`BeforeModelChain` 先 RLock 拷贝切片引用后迭代，消除 data race
+    - `internal/adk/event/bus.go`：`safeInvoke` 从 `_ = recover()` 改为 `log.Printf("event handler panic: %v", r)`
+
+202. **测试补齐（8 个新测试）**：
+    - `protocol/security_test.go`：新增 6 个测试覆盖 `ValidateBaseURL`（拒绝私有/允许公共/拒绝非法 scheme/允许空）+ `RedactString`（API key 掩码 + UTF-8 安全）+ `RateLimiter`
+    - `tools/terminal_test.go`：新增 2 个测试覆盖 `ValidatePath`（工作区内合法路径/路径遍历拒绝）
+    - protocol 单测数从 49 → 64
+
+203. **死代码清理**：
+    - 删除 `protocol/sse_framer.go`（271 行，`//go:build never` 排除编译）；同步清理 `protocol/openai.go` 中的引用注释
+
+204. 验证：`gofmt` 已执行；`go build ./...` 通过；`go vet ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（13 包 ok，filter/log/sessionlog 无测试文件）；两遍全绿确认无 flaky

@@ -44,7 +44,10 @@ func RunCompress(ctx context.Context, input CompressInput) (string, error) {
 			{"role": "user", "content": prompt},
 		},
 	}
-	body, _ := json.Marshal(reqBody)
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("序列化请求失败: %w", err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
@@ -62,7 +65,10 @@ func RunCompress(ctx context.Context, input CompressInput) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
 	var apiErr struct {
 		Error *struct {
 			Message string `json:"message"`

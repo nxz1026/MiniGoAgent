@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -14,6 +15,7 @@ const DefaultHistoryFile = "history.json"
 type Manager struct {
 	mu             sync.Mutex
 	sessions       map[string][]*schema.Message
+	lastAccess     map[string]time.Time
 	defaultSession string
 }
 
@@ -23,6 +25,7 @@ func NewManager(defaultSession string) *Manager {
 	}
 	return &Manager{
 		sessions:       map[string][]*schema.Message{},
+		lastAccess:     map[string]time.Time{},
 		defaultSession: defaultSession,
 	}
 }
@@ -34,6 +37,7 @@ func (m *Manager) DefaultSession() string {
 func (m *Manager) SnapshotWith(sid string, extra ...*schema.Message) []*schema.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lastAccess[sid] = time.Now()
 	msgs := append([]*schema.Message(nil), m.sessions[sid]...)
 	return append(msgs, extra...)
 }
@@ -42,12 +46,28 @@ func (m *Manager) Append(sid string, msgs ...*schema.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions[sid] = append(m.sessions[sid], msgs...)
+	m.lastAccess[sid] = time.Now()
 }
 
 func (m *Manager) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.sessions)
+}
+
+func (m *Manager) Cleanup(maxAge time.Duration) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	removed := 0
+	for sid, last := range m.lastAccess {
+		if now.Sub(last) > maxAge {
+			delete(m.sessions, sid)
+			delete(m.lastAccess, sid)
+			removed++
+		}
+	}
+	return removed
 }
 
 func (m *Manager) Save(path string) error {

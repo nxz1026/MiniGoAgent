@@ -17,7 +17,11 @@ func chatModel(t *testing.T) Protocol {
 	if apiKey == "" || baseURL == "" {
 		t.Skip("SKIP: 需要设置 OPENAI_API_KEY 和 OPENAI_BASE_URL")
 	}
-	return NewOpenAI(Config{APIKey: apiKey, BaseURL: baseURL, Model: getEnv("OPENAI_MODEL", "deepseek-v4-flash")})
+	p, err := NewOpenAI(Config{APIKey: apiKey, BaseURL: baseURL, Model: getEnv("OPENAI_MODEL", "deepseek-v4-flash")})
+	if err != nil {
+		t.Fatalf("NewOpenAI: %v", err)
+	}
+	return p
 }
 
 func getEnv(key, fallback string) string {

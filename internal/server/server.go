@@ -136,10 +136,14 @@ func (s *Server) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		for _, tc := range chunk.ToolCalls {
 			toolCallIDs = append(toolCallIDs, tc.ID)
 		}
-		data, _ := json.Marshal(map[string]any{
+		data, err := json.Marshal(map[string]any{
 			"content":    chunk.Content,
 			"tool_calls": toolCallIDs,
 		})
+		if err != nil {
+			log.Debug("marshal SSE chunk: %v", err)
+			continue
+		}
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 		fullContent.WriteString(chunk.Content)
@@ -261,7 +265,11 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 			flusher.Flush()
 			return
 		}
-		data, _ := json.Marshal(map[string]any{"content": "图片分析结果：\n" + visionResult})
+		data, err := json.Marshal(map[string]any{"content": "图片分析结果：\n" + visionResult})
+		if err != nil {
+			log.Debug("marshal vision result: %v", err)
+			return
+		}
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 
@@ -313,7 +321,11 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			break
 		}
-		data, _ := json.Marshal(map[string]any{"content": chunk.Content})
+		data, err := json.Marshal(map[string]any{"content": chunk.Content})
+		if err != nil {
+			log.Debug("marshal vision chunk: %v", err)
+			continue
+		}
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 		fullContent.WriteString(chunk.Content)

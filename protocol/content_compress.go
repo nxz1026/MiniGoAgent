@@ -40,9 +40,13 @@ func CachedCompressContent(content string, ct ContentType) string {
 
 	compressCacheMu.Lock()
 	if len(compressCache) >= compressCacheMax {
+		deleted := 0
 		for k := range compressCache {
 			delete(compressCache, k)
-			break
+			deleted++
+			if deleted >= 50 {
+				break
+			}
 		}
 	}
 	compressCache[key] = compressCacheEntry{result: result, timestamp: time.Now()}

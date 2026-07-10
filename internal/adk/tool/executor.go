@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"sync"
 )
@@ -73,7 +74,7 @@ func (e *ToolExecutor) executeSequential(ctx context.Context, calls []ToolCall) 
 		default:
 		}
 
-		result := e.runOne(ctx, call)
+		result := safeRunOne(e, ctx, call)
 		results = append(results, result)
 		if result.Failed {
 			return results
@@ -94,7 +95,7 @@ func (e *ToolExecutor) executeConcurrent(ctx context.Context, calls []ToolCall) 
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = e.runOne(ctx, call)
+			results[i] = safeRunOne(e, ctx, call)
 		}()
 	}
 
@@ -113,4 +114,14 @@ func (e *ToolExecutor) runOne(ctx context.Context, call ToolCall) ToolResult {
 		return ToolResult{Name: call.Name, ToolID: call.ToolID, Failed: true, Err: err}
 	}
 	return ToolResult{Name: call.Name, ToolID: call.ToolID, Result: result}
+}
+
+func safeRunOne(e *ToolExecutor, ctx context.Context, call ToolCall) (result ToolResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ToolResult{Name: call.Name, ToolID: call.ToolID, Failed: true,
+				Err: fmt.Errorf("tool panic: %v", r)}
+		}
+	}()
+	return e.runOne(ctx, call)
 }

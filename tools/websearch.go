@@ -24,7 +24,10 @@ func WebSearch(ctx context.Context, input SearchInput) (string, error) {
 		"query": input.Query,
 		"limit": 5,
 	}
-	body, _ := json.Marshal(reqBody)
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("序列化请求失败: %w", err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
@@ -42,7 +45,10 @@ func WebSearch(ctx context.Context, input SearchInput) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
 	var result struct {
 		Success bool `json:"success"`
 		Data    struct {

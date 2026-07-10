@@ -7,8 +7,6 @@ import (
 	"strings"
 )
 
-var allowPrivateURLs = os.Getenv("ALLOW_PRIVATE_URLS") == "true"
-
 func ValidateBaseURL(rawURL string) error {
 	if rawURL == "" {
 		return nil
@@ -25,7 +23,7 @@ func ValidateBaseURL(rawURL string) error {
 	if host == "" {
 		return &URLValidationError{URL: rawURL, Reason: "missing host"}
 	}
-	if !allowPrivateURLs {
+	if os.Getenv("ALLOW_PRIVATE_URLS") != "true" {
 		if isPrivateHost(host) {
 			return &URLValidationError{URL: rawURL, Reason: "private/internal URL blocked (set ALLOW_PRIVATE_URLS=true to override)"}
 		}
@@ -82,6 +80,9 @@ func isPrivateHost(host string) bool {
 }
 
 func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
 	privateRanges := []struct {
 		network string
 	}{

@@ -1,6 +1,7 @@
 package event
 
 import (
+	"log"
 	"reflect"
 	"sync"
 )
@@ -50,7 +51,9 @@ func (b *Bus) Publish(evt Event) {
 
 func safeInvoke(h Handler, evt Event) {
 	defer func() {
-		_ = recover()
+		if r := recover(); r != nil {
+			log.Printf("event handler panic: %v", r)
+		}
 	}()
 	h(evt)
 }

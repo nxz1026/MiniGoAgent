@@ -33,7 +33,6 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 - **Telemetry** — `Telemetry.Record()` collects duration/vendor/model/tokens per call; `FormatLine()` / `FormatMap()` for upper layers
 - **Vendor.String()** — Vendor enum now has string representation for telemetry output
 - **Tool/Schema Sorting** — `toWireTools()` sorts tools by name; `sortSchemaKeys()` recursively sorts JSON keys alphabetically
-- **SseFramer** (`sse_framer.go`) — Byte-level SSE frame parser + Bedrock EventStream binary framing (excluded from build via `//go:build never`; reserved for raw-TCP proxy scenarios)
 - **Multi-Key Rotation** — Auto-rotate API keys on 401/403; configured via `OPENAI_API_KEYS`
 - **Rate Limiter** (`ratelimit.go`) — Token bucket limiter per RPM/TPM; blocks before request
 - **Context Threshold** — `Telemetry` compares prompt tokens against `ModelContextWindow`; emits `ChunkWarn` / `Response.Warning` at configurable % thresholds (warn/compress)
@@ -54,6 +53,9 @@ A minimal LLM Agent built with Go and the [eino](https://github.com/cloudwego/ei
 - **Model Failover** — `FailoverConfig` switches to `OPENAI_FALLBACK_MODEL` after retry exhaustion; supports both Chat and Stream
 - **Raw HTTP Logging** — `RawLogProcessor` + `ChunkRaw*` events emit request/response/error JSONL to `logs/raw/` via `EventBus.TryPublish`
 - **ChunkType Registry** — `RegisterChunkType()` + `ChunkType.String()` for extensible event types
+- **Concurrency Safety** — `vendorCircuitBreaker` uses `sync.Map`; `EventBus.stopped` uses `atomic.Bool`; `Chain.Use()` uses `RWMutex` + copy-on-read; tool panic recovery prevents process crash
+- **Secure Stream Recovery** — Stream recovery errors propagated via `sw.Send(nil, err)`; ReactAgent.Stream Recv errors emit error events instead of silent exit
+- **Session TTL** — `Manager.Cleanup(maxAge)` evicts idle sessions; access time tracked on SnapshotWith/Append
 
 ---
 
@@ -136,7 +138,6 @@ docker run -p 8080:8080 \
 │   ├── telemetry.go         # Stats collector: Record/FormatLine/FormatMap + ModelContextWindow
 │   ├── content_detector.go  # Content type detection (5 types)
 │   ├── content_compress.go  # Per-type content compression strategy
-│   ├── sse_framer.go        # Byte-level SSE + Bedrock EventStream framing (declared, not wired)
 │   ├── ratelimit.go         # Token bucket rate limiter (RPM/TPM)
 │   ├── protocol_test.go           # Unit + mock tests (22 tests)
 │   └── openai_integration_test.go # Integration tests (9 tests)
@@ -258,7 +259,6 @@ go vet ./...
 - **Live Zone** — 只压缩最后一条 user 消息之后的内容，frozen 历史不动
 - **Telemetry 统计** — `Telemetry.Record()` 记录每次调用的耗时/供应商/模型/token；`FormatLine()`/`FormatMap()` 供上层使用
 - **工具/Schema 排序** — `toWireTools()` 按 name 排序工具；`sortSchemaKeys()` 递归排序 JSON key
-- **SseFramer** (`sse_framer.go`) — 字节级 SSE 帧解析 + Bedrock EventStream 二进制帧（`//go:build never` 排除编译，留待 raw TCP 代理场景）
 - **多 Key 轮转** — 401/403 自动换 key 重试，配置 `OPENAI_API_KEYS`
 - **Rate Limiter** (`ratelimit.go`) — Token bucket 限流（RPM/TPM），请求前阻塞等待
 - **上下文阈值** — `Telemetry` 对比 prompt tokens 与 model context window；超过阈值发出 `ChunkWarn` / `Response.Warning`
@@ -352,7 +352,6 @@ go run .
 │   ├── telemetry.go         # 统计收集：Record/FormatLine/FormatMap + ModelContextWindow
 │   ├── content_detector.go  # 内容类型检测（5 种）
 │   ├── content_compress.go  # 按类型压缩策略
-│   ├── sse_framer.go        # SSE + Bedrock EventStream 帧解析（声明未接入）
 │   ├── ratelimit.go         # Token bucket 限流器（RPM/TPM）
 │   ├── health_check.go      # 定时健康检查 + CircuitBreaker 联动
 │   ├── health_manager.go    # 多 vendor 健康管理

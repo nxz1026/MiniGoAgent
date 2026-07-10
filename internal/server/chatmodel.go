@@ -37,7 +37,10 @@ func (m *ChatModel) StatsJSON() string {
 	if !ok {
 		return ""
 	}
-	data, _ := json.Marshal(p.GetTelemetry().FormatMap())
+	data, err := json.Marshal(p.GetTelemetry().FormatMap())
+	if err != nil {
+		return ""
+	}
 	return string(data)
 }
 
@@ -172,11 +175,10 @@ func (m *ChatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 					sw.Send(&schema.Message{Role: schema.Assistant, Content: "[流中断，正在恢复...]"}, nil)
 					resp, err := m.forwardChat(ctx, req)
 					if err != nil {
+						sw.Send(nil, err)
 						return
 					}
-					if resp.Content != "" {
-						sw.Send(&schema.Message{Role: schema.Assistant, Content: resp.Content}, nil)
-					}
+					sw.Send(FromProtoResp(resp), nil)
 				}
 				return
 			}

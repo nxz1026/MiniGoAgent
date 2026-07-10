@@ -171,6 +171,10 @@ func (a *ReactAgent) Stream(ctx context.Context, req *adktypes.Request) (<-chan 
 			}
 			msg, err := sr.Recv()
 			if err != nil {
+				select {
+				case events <- adktypes.Event{Type: adktypes.EventError, Content: err.Error()}:
+				case <-ctx.Done():
+				}
 				return
 			}
 			if msg.Content != "" {
