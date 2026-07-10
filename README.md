@@ -18,6 +18,10 @@ Minimal LLM Agent powered by Go + [eino](https://github.com/cloudwego/eino) — 
 - Stream interruption auto-recovery: transparent fallback on mid-stream disconnect
 - Per-host connection pool: MaxConnsPerHost=50 with shared HTTP transport
 - Circuit breaker: per-vendor failure isolation and auto-recovery
+- SSRF protection: blocks localhost/LAN/private IPs by default (ALLOW_PRIVATE_URLS=true to override)
+- Secret redaction: logs and raw output redact API keys, tokens, passwords
+- Model failover: primary model falls back to OPENAI_FALLBACK_MODEL on persistent errors
+- Raw HTTP logging: enable with RAW_LOG=1, writes to logs/raw/ (JSONL)
 
 ---
 
@@ -57,6 +61,8 @@ docker run -p 8080:8080 \
 | `OPENAI_API_KEY` | — | API key |
 | `OPENAI_BASE_URL` | — | API endpoint |
 | `OPENAI_MODEL` | `deepseek-v4-flash` | Model name |
+| `OPENAI_FALLBACK_MODEL` | — | Fallback model on persistent errors |
+| `OPENAI_FALLBACK_BASE_URL` | — | Fallback API endpoint |
 | `PORT` | `8080` | Server port |
 | `LOG_LEVEL` | `INFO` | Log level |
 | `LOG_DIR` | `logs` | Log directory |
@@ -68,6 +74,9 @@ docker run -p 8080:8080 \
 | `CONTEXT_WARN_PCT` | `40` | Context warning threshold (%) |
 | `CONTEXT_COMPRESS_PCT` | `50` | Context compression signal (%) |
 | `AGENT_MAX_STEP` | `12` | Max ReAct agent loop steps |
+| `ALLOW_PRIVATE_URLS` | `false` | Allow localhost/LAN URLs (security risk) |
+| `RAW_LOG` | `0` | Enable raw HTTP logging (1=on) |
+| `RAW_LOG_DIR` | `logs/raw` | Raw log directory |
 | `MAX_RECONNECT_ATTEMPTS` | `3` | SSE stream reconnect attempts |
 
 ---
@@ -95,6 +104,13 @@ See [README.detail.md](README.detail.md) for architecture, protocol layer, proje
 - 统计卡片内联显示：`47s · auto · ↑92.7k · ↓1.4k · ctx 92.7k/524k 18%`
 - 多供应商：OpenAI、DeepSeek、Zhipu、MiniMax、LongCat、Ollama Cloud、MiMo、StepFun、Qwen
 - 图像识别：Native Mode（GPT-4o/DeepSeek-VL/Qwen-VL/Step-2 直通多模态），Tool Mode 降级
+- 流中断自动恢复：中途断线后静默重连补全，不丢对话上下文
+- Per-Host 连接池：共享 Transport，MaxConnsPerHost=50
+- 断路器：按供应商故障隔离 + 自动恢复
+- SSRF 防护：默认阻止 localhost/LAN/私有 IP（ALLOW_PRIVATE_URLS=true 关闭）
+- Secret 脱敏：日志和原始输出自动脱敏 API key/token/password
+- 模型级 Failover：主模型持续失败时切换到 OPENAI_FALLBACK_MODEL
+- Raw HTTP 日志：RAW_LOG=1 启用，写入 logs/raw/（JSONL）
 - 流中断自动恢复：中途断线后静默重连补全，不丢对话上下文
 - Per-Host 连接池：共享 Transport，MaxConnsPerHost=50
 - 断路器：按供应商故障隔离 + 自动恢复
@@ -137,6 +153,11 @@ docker run -p 8080:8080 \
 | `OPENAI_API_KEY` | — | API 密钥 |
 | `OPENAI_BASE_URL` | — | API 地址 |
 | `OPENAI_MODEL` | `deepseek-v4-flash` | 模型名称 |
+| `OPENAI_FALLBACK_MODEL` | — | 故障转移模型 |
+| `OPENAI_FALLBACK_BASE_URL` | — | 故障转移 API 地址 |
+| `ALLOW_PRIVATE_URLS` | `false` | 允许 localhost/LAN URL（安全风险） |
+| `RAW_LOG` | `0` | 启用原始 HTTP 日志（1=开启） |
+| `RAW_LOG_DIR` | `logs/raw` | 原始日志目录 |
 | `PORT` | `8080` | 服务端口 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `LOG_DIR` | `logs` | 日志目录 |

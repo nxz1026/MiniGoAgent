@@ -3,8 +3,9 @@
 > 最后更新：2026-07-09
 > 用途：给 LLM 提供完整项目上下文，避免重复发现
 > 铁律1：任何时候思考都用中文
-> 铁律2：每次阶段任务完成后迭代2个本文档（MEMO.md）
+> 铁律2：每次阶段任务完成后必须必须必须（没有商量的余地）必须测试，然后迭代本文档（MEMO.md）
 > 铁律3：迭代本文档不删除，只添加
+
 ---
 
 ## 项目概述
@@ -375,4 +376,16 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 66. `main.go`：`chatServer` 新增 `llm.model` 访问；`strPtr` 辅助函数；`MessageInputImage` 使用 `MessagePartCommon` 嵌入
 67. `frontend/index.html`：图片粘贴改为调用 `/api/vision/native`，实时流式渲染分析结果
 68. `protocol/protocol_test.go`：`TestDetectVendor` 增加 StepFun + Qwen 用例；修复 `TestEventBus_*` 同步时序问题；修复 `TestSendWithRetry_HealthShortCircuit` 使用 `setCheckerStatus` 替代直接修改
-69. `protocol/health_manager.go`：新增 `setCheckerStatus(vendor, status)` 方法供测试注入状态
+ 69. `protocol/health_manager.go`：新增 `setCheckerStatus(vendor, status)` 方法供测试注入状态
+
+### 第八轮（2026-07-10）：RAW 层增强 — SSRF/Secret Redaction/Failover/Raw Log
+
+70. `protocol/url_validator.go` 新增：`ValidateBaseURL()` 阻止 localhost/LAN/私有 IP，默认开启；`ValidateProxyEnv()` 校验 proxy 环境变量格式；`URLValidationError` 结构化错误
+71. `protocol/redact.go` 新增：`RedactString()` / `RedactHeaders()` / `RedactBody()` / `RedactURL()` 脱敏常见 secret 模式（API key/OAuth/AWS/GitHub/JWT/Basic Auth）
+72. `protocol/failover.go` 新增：`FailoverConfig{MaxRetries, ShouldFailover, GetFailoverModel}`；`Chat`/`Stream` 失败后按配置切换到备用模型/端点
+73. `protocol/raw_log.go` 新增：`RawLogProcessor` 实现 `ChunkProcessor`，JSONL 格式写入 `logs/raw/`；`ChunkRawRequest/RawResponse/RawError` 三种事件类型
+74. `protocol/stream.go`：`EventBus` 新增 `TryPublish()` 非阻塞发布，避免 raw log 阻塞主流程
+75. `protocol/types.go`：`ChunkType` 增加 `ChunkRawRequest/RawResponse/RawError`；`Config` 增加 `FallbackModel`/`FallbackBaseURL`；新增 `RegisterChunkType()`/`ChunkType.String()`
+76. `protocol/openai.go`：`NewOpenAI` 初始化 `failover` config；`Chat` → `chatWithFailover`；`Stream` → `streamWithFailover`；`buildHTTPRequest`/`chatDirect`/`readStream` emit raw chunk 到 EventBus
+77. `main.go`：`main()` 启动时调用 `ValidateBaseURL` + `ValidateProxyEnv`；`injectLogCtx` 对日志做 `RedactString`；`OPENAI_FALLBACK_MODEL`/`OPENAI_FALLBACK_BASE_URL` 传入 Config；`RAW_LOG=1` 启用 RawLogProcessor
+78. `protocol/protocol_test.go`：新增 vendor 测试 + 修复 EventBus/HealthShortCircuit 时序

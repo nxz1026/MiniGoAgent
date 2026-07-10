@@ -70,6 +70,9 @@ const (
 	ChunkWarn
 	ChunkDone
 	ChunkError
+	ChunkRawRequest
+	ChunkRawResponse
+	ChunkRawError
 )
 
 type Usage struct {
@@ -104,6 +107,8 @@ type Config struct {
 	ContextCompressPct int
 	MaxReconnect     int
 	HealthCheckURL   string
+	FallbackModel    string
+	FallbackBaseURL  string
 }
 
 type contextKey string
@@ -266,4 +271,25 @@ func New(kind string, cfg Config) (Protocol, error) {
 		return nil, fmt.Errorf("unknown provider kind: %s", kind)
 	}
 	return f(cfg)
+}
+
+var (
+	chunkTypeNames = map[ChunkType]string{}
+	chunkTypeMu    sync.RWMutex
+)
+
+func RegisterChunkType(t ChunkType, name string) {
+	chunkTypeMu.Lock()
+	chunkTypeNames[t] = name
+	chunkTypeMu.Unlock()
+}
+
+func (t ChunkType) String() string {
+	chunkTypeMu.RLock()
+	name, ok := chunkTypeNames[t]
+	chunkTypeMu.RUnlock()
+	if ok {
+		return name
+	}
+	return fmt.Sprintf("ChunkType(%d)", int(t))
 }

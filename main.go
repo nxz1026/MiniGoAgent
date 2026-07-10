@@ -240,6 +240,12 @@ func main() {
 	if apiKey == "" || baseURL == "" {
 		log.Fatal("请设置 OPENAI_API_KEY 和 OPENAI_BASE_URL")
 	}
+	if err := protocol.ValidateBaseURL(baseURL); err != nil {
+		log.Fatal("BaseURL 校验失败: %v", err)
+	}
+	if err := protocol.ValidateProxyEnv(); err != nil {
+		log.Warn("Proxy 环境变量异常: %v", err)
+	}
 
 	streamTimeout, _ := time.ParseDuration(getEnv("STREAM_TIMEOUT", "120s"))
 	proto, err := protocol.New("openai", protocol.Config{
@@ -253,9 +259,18 @@ func main() {
 		ContextWarnPct:     getEnvInt("CONTEXT_WARN_PCT", 40),
 		ContextCompressPct: getEnvInt("CONTEXT_COMPRESS_PCT", 50),
 		MaxReconnect:       getEnvInt("MAX_RECONNECT_ATTEMPTS", 3),
+		FallbackModel:      getEnv("OPENAI_FALLBACK_MODEL", ""),
+		FallbackBaseURL:    getEnv("OPENAI_FALLBACK_BASE_URL", ""),
 	})
 	if err != nil {
 		log.Fatal("创建 Protocol 失败: %v", err)
+	}
+	if getEnv("RAW_LOG", "") == "1" {
+		if p, ok := proto.(interface{ GetEventBus() *protocol.EventBus }); ok {
+			rawLog := protocol.NewRawLogProcessor(getEnv("RAW_LOG_DIR", "logs/raw"))
+			p.GetEventBus().Subscribe("raw", rawLog)
+			log.Info("RAW 日志已启用: %s", getEnv("RAW_LOG_DIR", "logs/raw"))
+		}
 	}
 	llm := &chatModel{proto: proto, model: getEnv("OPENAI_MODEL", "deepseek-v4-flash")}
 
@@ -422,9 +437,10 @@ func (s *chatServer) logAssistantResponse(sid, content string) {
 
 func (s *chatServer) injectLogCtx(ctx context.Context, sid string) context.Context {
 	return context.WithValue(ctx, protocol.CtxLogf, func(f string, a ...any) {
-		log.Debug(f, a...)
+		msg := protocol.RedactString(fmt.Sprint(fmt.Sprintf(f, a...)))
+		log.Info("%s", msg)
 		if sl := sessionlog.Get(sid); sl != nil {
-			sl.LogRaw(f, a)
+			sl.LogRaw(msg, nil)
 		}
 	})
 }

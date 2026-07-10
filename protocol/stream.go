@@ -49,6 +49,15 @@ func (eb *EventBus) Publish(ctx context.Context, chunk Chunk) error {
 	}
 }
 
+func (eb *EventBus) TryPublish(chunk Chunk) bool {
+	select {
+	case eb.publisher <- chunk:
+		return true
+	default:
+		return false
+	}
+}
+
 func (eb *EventBus) Stop() {
 	close(eb.publisher)
 	eb.wg.Wait()

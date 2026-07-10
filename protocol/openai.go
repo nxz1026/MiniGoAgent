@@ -51,9 +51,12 @@ type OpenAI struct {
 	keyMu         sync.Mutex
 	lastUsage     *Usage
 	eventBus      *EventBus
+	failover      FailoverConfig
 }
 
 func (o *OpenAI) GetTelemetry() *Telemetry { return o.Telemetry }
+
+func (o *OpenAI) GetEventBus() *EventBus { return o.eventBus }
 
 var bodyPool = sync.Pool{
 	New: func() any { return make(map[string]any, 16) },
@@ -78,6 +81,10 @@ func defaultHTTPClient(timeout time.Duration) *http.Client {
 
 func NewOpenAI(cfg Config) *OpenAI {
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	if err := ValidateBaseURL(baseURL); err != nil {
+		// log via internal error field; construction continues so callers can handle nil-check
+		// Most callers should call ValidateBaseURL explicitly before NewOpenAI
+	}
 	apiKeys := cfg.APIKeys
 	if len(apiKeys) == 0 && cfg.APIKey != "" {
 		apiKeys = []string{cfg.APIKey}
@@ -103,6 +110,17 @@ func NewOpenAI(cfg Config) *OpenAI {
 		rateLimiter:   NewRateLimiter(cfg.RateLimitRPM, cfg.RateLimitTPM),
 		Telemetry:     NewTelemetry(),
 		eventBus:      NewEventBus(context.Background(), 256),
+	}
+	if cfg.FallbackModel != "" && cfg.FallbackBaseURL != "" {
+		o.failover = FailoverConfig{
+			MaxRetries: 2,
+			ShouldFailover: func(model, vendor string, err error) bool {
+				return true
+			},
+			GetFailoverModel: func(model, vendor string) (string, string, bool) {
+				return cfg.FallbackModel, cfg.FallbackBaseURL, true
+			},
+		}
 	}
 	o.Telemetry.SetThresholds(cfg.ContextWarnPct, cfg.ContextCompressPct)
 	switch o.vendor {
@@ -131,7 +149,45 @@ func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	if err := o.rateLimiter.Wait(ctx, estimateTokens(req)); err != nil {
 		return nil, err
 	}
-	return o.chatDirect(ctx, req, start)
+	return o.chatWithFailover(ctx, req, start)
+}
+
+func (o *OpenAI) chatWithFailover(ctx context.Context, req Request, start time.Time) (*Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= o.failover.maxRetries(); attempt++ {
+		if attempt > 0 {
+			if !o.failover.shouldFailover(o.model, o.vendor.String(), lastErr) {
+				return nil, lastErr
+			}
+			fallbackModel, fallbackURL, ok := o.failover.getFailoverModel(o.model, o.vendor.String())
+			if !ok {
+				return nil, lastErr
+			}
+			o.logf(ctx, "RAW failover attempt=%d model=%s->%s baseURL=%s err=%v",
+				attempt, o.model, fallbackModel, fallbackURL, lastErr)
+			o.applyFailover(fallbackModel, fallbackURL)
+		}
+		resp, err := o.chatDirect(ctx, req, start)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func (o *OpenAI) applyFailover(model, baseURL string) {
+	o.baseURL = strings.TrimRight(baseURL, "/") + "/chat/completions"
+	o.model = model
+	o.vendor = DetectVendor(baseURL)
+	switch o.vendor {
+	case VendorDeepSeek:
+		o.policy = reasoningThinking
+	case VendorZhipu, VendorMiniMax, VendorLongCat, VendorMiMo, VendorStepFun, VendorQwen:
+		o.policy = reasoningThinking
+	default:
+		o.policy = reasoningEffort
+	}
 }
 
 func (o *OpenAI) chatDirect(ctx context.Context, req Request, start time.Time) (*Response, error) {
@@ -144,15 +200,24 @@ func (o *OpenAI) chatDirect(ctx context.Context, req Request, start time.Time) (
 	httpReq.Header.Set("Authorization", "Bearer "+o.currentKey())
 	o.logf(ctx, "RAW POST %s body=%dKB msgs=%d tools=%d model=%s (non-stream)",
 		o.baseURL, len(body)/1024, len(req.Messages), len(req.Tools), o.model)
+	if o.eventBus != nil {
+		o.eventBus.TryPublish(Chunk{Type: ChunkRawRequest, Text: string(RedactBody(body))})
+	}
 
 	resp, err := o.client.Do(httpReq)
 	if err != nil {
+		if o.eventBus != nil {
+			o.eventBus.TryPublish(Chunk{Type: ChunkRawError, Text: "request failed: " + err.Error()})
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyData, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
+		if o.eventBus != nil {
+			o.eventBus.TryPublish(Chunk{Type: ChunkRawResponse, Text: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyData)))})
+		}
 		return nil, fmt.Errorf("API error (status=%d): %s", resp.StatusCode, strings.TrimSpace(string(bodyData)))
 	}
 
@@ -219,11 +284,11 @@ func estimateTokens(req Request) int {
 
 func (o *OpenAI) Stream(ctx context.Context, req Request) (<-chan Chunk, error) {
 	out := make(chan Chunk, 256)
-	go o.streamWithReconnect(ctx, req, out)
+	go o.streamWithFailover(ctx, req, out)
 	return out, nil
 }
 
-func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<- Chunk) {
+func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<- Chunk) {
 	var emitted bool
 	var lastErr error
 	start := time.Now()
@@ -231,12 +296,33 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 		sendChunk(ctx, out, Chunk{Type: ChunkError, Error: err})
 		return
 	}
-	for attempt := 0; attempt <= o.maxReconnect; attempt++ {
+	maxReconnect := o.maxReconnect
+	failoverMax := 0
+	if o.failover.maxRetries() > 0 {
+		failoverMax = o.failover.maxRetries()
+	}
+	totalAttempts := maxReconnect + failoverMax + 1
+	for attempt := 0; attempt <= totalAttempts; attempt++ {
 		if attempt > 0 {
 			if emitted {
-				o.logf(ctx, "RAW reconnect attempt=%d skipped (already emitted)", attempt)
+				o.logf(ctx, "RAW reconnect/failover attempt=%d skipped (already emitted)", attempt)
 				sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr})
 				return
+			}
+			if failoverMax > 0 && attempt > maxReconnect {
+				if !o.failover.shouldFailover(o.model, o.vendor.String(), lastErr) {
+					sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr})
+					return
+				}
+				fallbackModel, fallbackURL, ok := o.failover.getFailoverModel(o.model, o.vendor.String())
+				if !ok {
+					sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr})
+					return
+				}
+				o.logf(ctx, "RAW failover attempt=%d model=%s->%s baseURL=%s err=%v",
+					attempt-maxReconnect, o.model, fallbackModel, fallbackURL, lastErr)
+				o.applyFailover(fallbackModel, fallbackURL)
+				continue
 			}
 			delay := backoffDelay(attempt, 0)
 			o.logf(ctx, "RAW reconnect attempt=%d delay=%v err=%v", attempt, delay, lastErr)
@@ -252,6 +338,9 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 		if err != nil {
 			o.logf(ctx, "RAW SendWithRetry attempt=%d err=%v", attempt, err)
 			lastErr = err
+			if o.eventBus != nil {
+				o.eventBus.TryPublish(Chunk{Type: ChunkRawError, Text: "send_with_retry: " + err.Error()})
+			}
 			var ae *AuthError
 			if errors.As(err, &ae) && o.rotateKey() {
 				o.logf(ctx, "RAW key rotated to index=%d on auth error", o.keyIndex)
@@ -263,6 +352,9 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 		if err != nil {
 			o.logf(ctx, "RAW readStream attempt=%d err=%v emitted=%v", attempt, err, emitted)
 			lastErr = err
+			if o.eventBus != nil {
+				o.eventBus.TryPublish(Chunk{Type: ChunkRawError, Text: "readStream: " + err.Error()})
+			}
 			if emitted || !IsConnReset(err) {
 				if !emitted {
 					sendChunk(ctx, out, Chunk{Type: ChunkError, Error: err})
@@ -274,7 +366,7 @@ func (o *OpenAI) streamWithReconnect(ctx context.Context, req Request, out chan<
 		o.recordStreamCall(start, nil)
 		return
 	}
-	o.logf(ctx, "RAW all reconnect attempts exhausted last_err=%v", lastErr)
+	o.logf(ctx, "RAW all reconnect/failover attempts exhausted last_err=%v", lastErr)
 	sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr})
 	o.recordStreamCall(start, lastErr)
 }
@@ -564,6 +656,17 @@ func (o *OpenAI) buildThinkingFields(m map[string]any) {
 func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<- Chunk) (emitted bool, _ error) {
 	defer resp.Body.Close()
 	defer close(out)
+
+	if o.eventBus != nil {
+		var headerBuf strings.Builder
+		headerBuf.WriteString(fmt.Sprintf("HTTP/%d.%d %d %s\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, resp.Status))
+		for k, v := range resp.Header {
+			for _, vv := range v {
+				headerBuf.WriteString(fmt.Sprintf("%s: %s\n", k, vv))
+			}
+		}
+		o.eventBus.TryPublish(Chunk{Type: ChunkRawResponse, Text: headerBuf.String()})
+	}
 
 	idleTimeout := o.streamTimeout
 	if idleTimeout <= 0 {
