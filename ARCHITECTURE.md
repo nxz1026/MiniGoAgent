@@ -49,9 +49,10 @@ Current package responsibilities:
 
 | Package/File | Current Responsibility | Boundary Notes |
 |---|---|---|
-| `main.go` | HTTP server, app bootstrap, eino adapter, request handlers | Still large; session state extracted to internal/session |
+| `main.go` | App bootstrap, dependency assembly | Thin wiring layer; reads config, builds proto/agent/server, starts HTTP |
 | `internal/config` | Environment loading and typed application configuration | First extracted internal layer; main consumes `config.Load()` |
 | `internal/session` | In-memory session state, snapshot/append, JSON history persistence | Manager wraps session map + lock; uses `Marshal`/`Unmarshal` DTO conversion |
+| `internal/server` | HTTP handlers, SSE streaming, ChatModel adapter, request helpers, vision tools | Exports `Server`, `ChatModel`, `AgentRunner`, `PromptProvider` |
 | `protocol/` | LLM protocol, OpenAI-compatible wire format, stream parsing, retry/failover/telemetry/raw logging/usage analytics | This is not MCP; it is closer to LLM provider protocol/RAW gateway |
 | `tools/` | Agent-callable skill implementations | Keep stable until ADK tool lifecycle is designed |
 | `tools/filter/` | RTK-style terminal output filtering | Already wired through `tools/terminal.go` |
@@ -195,10 +196,9 @@ Current runtime uses eino `react.Agent` directly from `main.go` through `chatMod
 Current responsibilities still in `main.go`:
 
 - Build protocol provider from `internal/config.Config`.
-- Build chatModel adapter.
+- Build ChatModel adapter via `server.NewChatModel`.
 - Infer and register tools.
 - Configure `react.Agent`.
-- Serve HTTP and SSE endpoints.
 
 Future ADK boundary should introduce:
 
@@ -276,7 +276,7 @@ First implementation should prefer offline Python scripts over a mandatory alway
 
 ## 10. Known Technical Debt
 
-- `main.go` is still too large and owns server, app bootstrap, and adapter responsibilities (session state extracted to `internal/session`).
+- `main.go` is now a thin wiring layer; server, session, and adapter extracted. `internal/server` is the only package that knows about eino types and HTTP simultaneously.
 - `protocol/` name is broad. It currently means LLM provider protocol/RAW gateway, not MCP.
 - `reference/eino` is a local replace dependency and currently appears as an abnormal/untracked git status item in this workspace.
 - README and MEMO are append-heavy and can contain old counts in earlier sections; latest sections are authoritative.
@@ -289,11 +289,13 @@ First implementation should prefer offline Python scripts over a mandatory alway
 Completed steps:
 
 - `internal/session` — session state, snapshot/append, JSON history persistence extracted from `main.go`.
+- `internal/server` — HTTP handlers, SSE streaming, ChatModel adapter, vision helpers extracted from `main.go`.
+- `AgentRunner` and `PromptProvider` interfaces defined in `internal/server`.
 
 Allowed next steps:
 
-- Add `internal/server` and move HTTP handlers there.
-- Add `AgentRunner` and `PromptProvider` interfaces without rewriting eino usage.
+- Replace `*react.Agent` usage with `AgentRunner` interface in `Server`.
+- Wire `PromptProvider` into `Server` for configurable system prompts.
 
 Do not do yet:
 
