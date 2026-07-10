@@ -25,7 +25,7 @@ func init() {
 type reasoningPolicy int
 
 const (
-	reasoningNone      reasoningPolicy = iota
+	reasoningNone reasoningPolicy = iota
 	reasoningEffort
 	reasoningThinking
 )
@@ -157,12 +157,12 @@ func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	}
 	resp, err := o.chatWithFailover(ctx, *modifiedReq, start)
 	if err != nil {
-		RunOnErrorHooks(ctx, &req, err)
+		RunOnErrorHooks(ctx, modifiedReq, err)
 		return nil, err
 	}
-	resp, err = RunAfterProcessHooks(ctx, &req, resp)
+	resp, err = RunAfterProcessHooks(ctx, modifiedReq, resp)
 	if err != nil {
-		RunOnErrorHooks(ctx, &req, err)
+		RunOnErrorHooks(ctx, modifiedReq, err)
 		return nil, err
 	}
 	return resp, nil
@@ -243,8 +243,8 @@ func (o *OpenAI) chatDirect(ctx context.Context, req Request, start time.Time) (
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
 				ToolCalls        []struct {
-					ID   string `json:"id"`
-					Type string `json:"type"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
 					Function struct {
 						Name      string `json:"name"`
 						Arguments string `json:"arguments"`
@@ -253,7 +253,7 @@ func (o *OpenAI) chatDirect(ctx context.Context, req Request, start time.Time) (
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
-		Usage *Usage `json:"usage"`
+		Usage *Usage                    `json:"usage"`
 		Error *struct{ Message string } `json:"error"`
 	}
 	if err := json.Unmarshal(bodyData, &result); err != nil {
@@ -314,6 +314,7 @@ func (o *OpenAI) Stream(ctx context.Context, req Request) (<-chan Chunk, error) 
 func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<- Chunk) {
 	var emitted bool
 	var lastErr error
+	defer close(out)
 	start := time.Now()
 	if err := o.rateLimiter.Wait(ctx, estimateTokens(req)); err != nil {
 		RunOnErrorHooks(ctx, &req, err)
@@ -357,6 +358,7 @@ func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<-
 			o.logf(ctx, "RAW reconnect attempt=%d delay=%v err=%v", attempt, delay, lastErr)
 			select {
 			case <-ctx.Done():
+				lastErr = ctx.Err()
 				return
 			case <-time.After(delay):
 			}
@@ -392,7 +394,10 @@ func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<-
 			}
 			continue
 		}
-		o.recordStreamCall(ctx, start, nil)
+		usage := o.recordStreamCall(ctx, start, nil)
+		if _, hookErr := RunAfterProcessHooks(ctx, &req, &Response{Usage: usage}); hookErr != nil {
+			RunOnErrorHooks(ctx, &req, hookErr)
+		}
 		return
 	}
 	o.logf(ctx, "RAW all reconnect/failover attempts exhausted last_err=%v", lastErr)
@@ -400,15 +405,16 @@ func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<-
 	o.recordStreamCall(ctx, start, lastErr)
 }
 
-func (o *OpenAI) recordStreamCall(ctx context.Context, start time.Time, err error) {
+func (o *OpenAI) recordStreamCall(ctx context.Context, start time.Time, err error) *Usage {
 	o.usageMu.Lock()
 	usage := o.lastUsage
 	o.lastUsage = nil
 	o.usageMu.Unlock()
 	if err != nil {
-		return
+		return nil
 	}
 	o.Telemetry.RecordFromContext(ctx, o.model, o.vendor.String(), time.Since(start).Seconds(), usage)
+	return usage
 }
 
 func (o *OpenAI) sendContextWarning(ctx context.Context, out chan<- Chunk, usage *Usage) {
@@ -684,7 +690,6 @@ func (o *OpenAI) buildThinkingFields(m map[string]any) {
 // here — see that file for details and wiring instructions.
 func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<- Chunk) (emitted bool, _ error) {
 	defer resp.Body.Close()
-	defer close(out)
 
 	if o.eventBus != nil {
 		var headerBuf strings.Builder
@@ -773,9 +778,9 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 		var sr struct {
 			Choices []struct {
 				Delta struct {
-					Content          string                   `json:"content"`
-					ReasoningContent string                   `json:"reasoning_content"`
-					Reasoning        string                   `json:"reasoning"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
 					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`

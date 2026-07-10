@@ -180,30 +180,30 @@ func (m *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ..
 	}
 
 	sr, sw := schema.Pipe[*schema.Message](64)
-		go func() {
-			defer sw.Close()
-			for chunk := range ch {
-				switch chunk.Type {
-				case protocol.ChunkText:
-					sw.Send(&schema.Message{Role: schema.Assistant, Content: chunk.Text}, nil)
-				case protocol.ChunkError:
-					var interrupted *protocol.StreamInterruptedError
-					if chunk.Error != nil && errors.As(chunk.Error, &interrupted) {
-						sw.Send(&schema.Message{Role: schema.Assistant, Content: "[流中断，正在恢复...]"}, nil)
-						resp, err := m.forwardChat(ctx, req)
-						if err != nil {
-							return
-						}
-						if resp.Content != "" {
-							sw.Send(&schema.Message{Role: schema.Assistant, Content: resp.Content}, nil)
-						}
+	go func() {
+		defer sw.Close()
+		for chunk := range ch {
+			switch chunk.Type {
+			case protocol.ChunkText:
+				sw.Send(&schema.Message{Role: schema.Assistant, Content: chunk.Text}, nil)
+			case protocol.ChunkError:
+				var interrupted *protocol.StreamInterruptedError
+				if chunk.Error != nil && errors.As(chunk.Error, &interrupted) {
+					sw.Send(&schema.Message{Role: schema.Assistant, Content: "[流中断，正在恢复...]"}, nil)
+					resp, err := m.forwardChat(ctx, req)
+					if err != nil {
+						return
 					}
-					return
+					if resp.Content != "" {
+						sw.Send(&schema.Message{Role: schema.Assistant, Content: resp.Content}, nil)
+					}
 				}
+				return
 			}
-		}()
-		return sr, nil
-	}
+		}
+	}()
+	return sr, nil
+}
 
 func (m *chatModel) forwardChat(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
 	return m.proto.Chat(ctx, req)
@@ -273,8 +273,10 @@ func main() {
 		}
 	}
 	var mcpServer *protocol.MCPServer
+	var usageTracker *protocol.UsageTracker
 	if getEnv("USAGE_DB", "") == "1" {
-		usageTracker, utErr := protocol.NewUsageTracker("logs/raw/usage.db")
+		var utErr error
+		usageTracker, utErr = protocol.NewUsageTracker("logs/raw/usage.db")
 		if utErr != nil {
 			log.Warn("Usage 数据库初始化失败: %v", utErr)
 		} else {
@@ -340,6 +342,11 @@ func main() {
 		<-ctx.Done()
 		log.Info("收到退出信号，正在保存历史...")
 		srv.saveHistory()
+		if usageTracker != nil {
+			if err := usageTracker.Close(); err != nil {
+				log.Warn("关闭 Usage 数据库失败: %v", err)
+			}
+		}
 		os.Exit(0)
 	}()
 
@@ -369,13 +376,14 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req chatReq
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
 
-	s.mu.Lock()
 	sid := s.sessionID(r)
-	msgs := s.messages(sid)
-	msgs = append(msgs, schema.UserMessage(req.Message))
-	s.mu.Unlock()
+	userMsg := schema.UserMessage(req.Message)
+	msgs := s.snapshotWith(sid, userMsg)
 
 	s.logUserMessage(sid, req.Message)
 
@@ -428,11 +436,7 @@ func (s *chatServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
-	s.mu.Lock()
-	msgs = s.messages(sid)
-	msgs = append(msgs, &schema.Message{Role: schema.Assistant, Content: fullContent.String()})
-	s.sessions[sid] = msgs
-	s.mu.Unlock()
+	s.appendMessages(sid, userMsg, &schema.Message{Role: schema.Assistant, Content: fullContent.String()})
 
 	s.logAssistantResponse(sid, fullContent.String())
 }
@@ -490,13 +494,29 @@ func (s *chatServer) messages(sid string) []*schema.Message {
 	return nil
 }
 
+func (s *chatServer) snapshotWith(sid string, extra ...*schema.Message) []*schema.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs := append([]*schema.Message(nil), s.sessions[sid]...)
+	return append(msgs, extra...)
+}
+
+func (s *chatServer) appendMessages(sid string, msgs ...*schema.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[sid] = append(s.sessions[sid], msgs...)
+}
+
 func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
 	var req chatReq
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
 
 	sid := s.sessionID(r)
 
@@ -517,21 +537,15 @@ func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	msgs := s.messages(sid)
-	msgs = append(msgs, schema.UserMessage(req.Message))
-	s.mu.Unlock()
+	userMsg := schema.UserMessage(req.Message)
+	msgs := s.snapshotWith(sid, userMsg)
 	ctx := s.injectLogCtx(r.Context(), sid)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
-	s.mu.Lock()
-	msgs = s.messages(sid)
-	msgs = append(msgs, result)
-	s.sessions[sid] = msgs
-	s.mu.Unlock()
+	s.appendMessages(sid, userMsg, result)
 
 	s.logAssistantResponse(sid, result.Content)
 
@@ -549,31 +563,27 @@ func (s *chatServer) handleVision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req visionReq
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
 
-	s.mu.Lock()
 	sid := s.sessionID(r)
-	msgs := s.messages(sid)
-	s.mu.Unlock()
 
-	visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
+	ctx := s.injectLogCtx(r.Context(), sid)
+	visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "Vision 错误: " + err.Error()})
 		return
 	}
 	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + req.Prompt + "\n\n图片分析结果：\n" + visionResult)
-	msgs = append(msgs, userMsg)
-	ctx := s.injectLogCtx(r.Context(), sid)
+	msgs := s.snapshotWith(sid, userMsg)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
-	s.mu.Lock()
-	msgs = s.messages(sid)
-	msgs = append(msgs, result)
-	s.sessions[sid] = msgs
-	s.mu.Unlock()
+	s.appendMessages(sid, userMsg, result)
 	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 }
 
@@ -591,48 +601,38 @@ func (s *chatServer) handleVisionFromChat(w http.ResponseWriter, r *http.Request
 		}
 		imagePart := schema.MessageInputPart{
 			Type: schema.ChatMessagePartTypeImageURL,
-		Image: &schema.MessageInputImage{
-			MessagePartCommon: schema.MessagePartCommon{URL: strPtr(dataURL)},
-		},
+			Image: &schema.MessageInputImage{
+				MessagePartCommon: schema.MessagePartCommon{URL: strPtr(dataURL)},
+			},
 		}
 		userMsg := &schema.Message{
 			Role:                  schema.User,
 			Content:               "[图片] " + prompt,
 			UserInputMultiContent: []schema.MessageInputPart{textPart, imagePart},
 		}
-		msgs := s.messages(sid)
-		msgs = append(msgs, userMsg)
+		msgs := s.snapshotWith(sid, userMsg)
 		result, err := s.agent.Generate(ctx, msgs)
 		if err != nil {
 			json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 			return
 		}
-		s.mu.Lock()
-		msgs = s.messages(sid)
-		msgs = append(msgs, result)
-		s.sessions[sid] = msgs
-		s.mu.Unlock()
+		s.appendMessages(sid, userMsg, result)
 		json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 		return
 	}
-	visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: img, Prompt: prompt})
+	visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: img, Prompt: prompt})
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "Vision 错误: " + err.Error()})
 		return
 	}
 	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + prompt + "\n\n图片分析结果：\n" + visionResult)
-	msgs := s.messages(sid)
-	msgs = append(msgs, userMsg)
+	msgs := s.snapshotWith(sid, userMsg)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
 		return
 	}
-	s.mu.Lock()
-	msgs = s.messages(sid)
-	msgs = append(msgs, result)
-	s.sessions[sid] = msgs
-	s.mu.Unlock()
+	s.appendMessages(sid, userMsg, result)
 	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
 }
 
@@ -642,12 +642,13 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var req visionReq
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
 
-	s.mu.Lock()
 	sid := s.sessionID(r)
-	msgs := s.messages(sid)
-	s.mu.Unlock()
+	msgs := s.snapshotWith(sid)
 
 	s.logUserMessage(sid, "[图片] "+req.Prompt)
 
@@ -663,7 +664,7 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 	ctx := s.injectLogCtx(r.Context(), sid)
 
 	if !supportsVision(s.llm.model) {
-		visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
+		visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
 			flusher.Flush()
@@ -673,12 +674,10 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 
-		s.mu.Lock()
-		msgs = s.messages(sid)
-		msgs = append(msgs, schema.UserMessage("[图片] "+req.Prompt+"\n\n图片分析结果：\n"+visionResult))
-		msgs = append(msgs, &schema.Message{Role: schema.Assistant, Content: visionResult})
-		s.sessions[sid] = msgs
-		s.mu.Unlock()
+		s.appendMessages(sid,
+			schema.UserMessage("[图片] "+req.Prompt+"\n\n图片分析结果：\n"+visionResult),
+			&schema.Message{Role: schema.Assistant, Content: visionResult},
+		)
 		return
 	}
 
@@ -730,11 +729,7 @@ func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Req
 	}
 
 	resultMsg := &schema.Message{Role: schema.Assistant, Content: fullContent.String()}
-	s.mu.Lock()
-	msgs = s.messages(sid)
-	msgs = append(msgs, resultMsg)
-	s.sessions[sid] = msgs
-	s.mu.Unlock()
+	s.appendMessages(sid, userMsg, resultMsg)
 
 	if statsJSON := s.llm.StatsJSON(); statsJSON != "" {
 		fmt.Fprintf(w, "data: %s\n\n", statsJSON)

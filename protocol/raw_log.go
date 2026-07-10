@@ -10,9 +10,10 @@ import (
 )
 
 type RawLogProcessor struct {
-	dir    string
-	file   *os.File
-	mu     sync.Mutex
+	dir     string
+	file    *os.File
+	date    string
+	mu      sync.Mutex
 	enabled bool
 }
 
@@ -31,7 +32,7 @@ func (p *RawLogProcessor) Process(ctx context.Context, chunk Chunk) error {
 	case ChunkRawRequest, ChunkRawResponse, ChunkRawError:
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		if p.file == nil {
+		if p.file == nil || p.date != time.Now().Format("2006-01-02") {
 			p.rotate()
 		}
 		line, _ := json.Marshal(map[string]any{
@@ -39,7 +40,10 @@ func (p *RawLogProcessor) Process(ctx context.Context, chunk Chunk) error {
 			"kind": chunk.Type.String(),
 			"data": chunk.Text,
 		})
-		p.file.Write(append(line, '\n'))
+		if _, err := p.file.Write(append(line, '\n')); err != nil {
+			p.enabled = false
+			return err
+		}
 	}
 	return nil
 }
@@ -60,6 +64,7 @@ func (p *RawLogProcessor) rotate() {
 		return
 	}
 	p.file = f
+	p.date = date
 }
 
 func (p *RawLogProcessor) Stop() {
@@ -68,6 +73,7 @@ func (p *RawLogProcessor) Stop() {
 	if p.file != nil {
 		p.file.Close()
 		p.file = nil
+		p.date = ""
 	}
 }
 

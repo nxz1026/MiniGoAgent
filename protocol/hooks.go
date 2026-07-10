@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -20,6 +21,9 @@ type LifecycleHookRegistry struct {
 var globalLifecycleHooks = &LifecycleHookRegistry{}
 
 func RegisterLifecycleHook(h LifecycleHook) {
+	if h == nil {
+		return
+	}
 	globalLifecycleHooks.mu.Lock()
 	defer globalLifecycleHooks.mu.Unlock()
 	globalLifecycleHooks.hooks = append(globalLifecycleHooks.hooks, h)
@@ -33,7 +37,7 @@ func ClearLifecycleHooks() {
 
 func RunBeforeProcessHooks(ctx context.Context, req *Request) (*Request, error) {
 	globalLifecycleHooks.mu.RLock()
-	items := globalLifecycleHooks.hooks
+	items := append([]LifecycleHook(nil), globalLifecycleHooks.hooks...)
 	globalLifecycleHooks.mu.RUnlock()
 	var err error
 	for _, h := range items {
@@ -41,13 +45,16 @@ func RunBeforeProcessHooks(ctx context.Context, req *Request) (*Request, error) 
 		if err != nil {
 			return nil, err
 		}
+		if req == nil {
+			return nil, fmt.Errorf("lifecycle hook %q returned nil request", h.Name())
+		}
 	}
 	return req, nil
 }
 
 func RunAfterProcessHooks(ctx context.Context, req *Request, resp *Response) (*Response, error) {
 	globalLifecycleHooks.mu.RLock()
-	items := globalLifecycleHooks.hooks
+	items := append([]LifecycleHook(nil), globalLifecycleHooks.hooks...)
 	globalLifecycleHooks.mu.RUnlock()
 	var err error
 	for _, h := range items {
@@ -55,13 +62,16 @@ func RunAfterProcessHooks(ctx context.Context, req *Request, resp *Response) (*R
 		if err != nil {
 			return nil, err
 		}
+		if resp == nil {
+			return nil, fmt.Errorf("lifecycle hook %q returned nil response", h.Name())
+		}
 	}
 	return resp, nil
 }
 
 func RunOnErrorHooks(ctx context.Context, req *Request, err error) error {
 	globalLifecycleHooks.mu.RLock()
-	items := globalLifecycleHooks.hooks
+	items := append([]LifecycleHook(nil), globalLifecycleHooks.hooks...)
 	globalLifecycleHooks.mu.RUnlock()
 	for _, h := range items {
 		_ = h.OnError(ctx, req, err)
@@ -70,10 +80,10 @@ func RunOnErrorHooks(ctx context.Context, req *Request, err error) error {
 }
 
 type LifecycleHookFuncs struct {
-	name         string
-	beforeFn     func(ctx context.Context, req *Request) (*Request, error)
-	afterFn      func(ctx context.Context, req *Request, resp *Response) (*Response, error)
-	onErrorFn    func(ctx context.Context, req *Request, err error) error
+	name      string
+	beforeFn  func(ctx context.Context, req *Request) (*Request, error)
+	afterFn   func(ctx context.Context, req *Request, resp *Response) (*Response, error)
+	onErrorFn func(ctx context.Context, req *Request, err error) error
 }
 
 func NewLifecycleHook(name string) *LifecycleHookFuncs {

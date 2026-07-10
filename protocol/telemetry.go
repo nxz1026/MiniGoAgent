@@ -16,18 +16,18 @@ type CallRecord struct {
 }
 
 type Telemetry struct {
-	mu        sync.Mutex
-	last      CallRecord
-	modelCtx  map[string]int
-	warnPct   int
-	comprPct  int
-	lastWarn  bool
-	lastCompr bool
+	mu         sync.Mutex
+	last       CallRecord
+	modelCtx   map[string]int
+	warnPct    int
+	comprPct   int
+	lastWarn   bool
+	lastCompr  bool
 	chunkBytes int64
 	toolCalls  int64
 	errors     int64
-	sessionID string
-	tracker   *UsageTracker
+	sessionID  string
+	tracker    *UsageTracker
 }
 
 func NewTelemetry() *Telemetry {
@@ -65,7 +65,13 @@ func (t *Telemetry) SetSessionID(sid string) {
 
 func (t *Telemetry) Record(model, vendor string, durSec float64, usage *Usage) (warn, compress bool) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	sid := t.sessionID
+	t.mu.Unlock()
+	return t.record(sid, model, vendor, durSec, usage)
+}
+
+func (t *Telemetry) record(sessionID, model, vendor string, durSec float64, usage *Usage) (warn, compress bool) {
+	t.mu.Lock()
 	promptTks, completionTks := 0, 0
 	if usage != nil {
 		promptTks = usage.PromptTokens
@@ -93,17 +99,20 @@ func (t *Telemetry) Record(model, vendor string, durSec float64, usage *Usage) (
 			}
 		}
 	}
-	if t.tracker != nil {
-		_ = t.tracker.Record(t.sessionID, model, vendor, durSec, promptTks, completionTks)
+	tracker := t.tracker
+	t.mu.Unlock()
+	if tracker != nil {
+		_ = tracker.Record(sessionID, model, vendor, durSec, promptTks, completionTks)
 	}
 	return
 }
 
 func (t *Telemetry) RecordFromContext(ctx context.Context, model, vendor string, durSec float64, usage *Usage) (warn, compress bool) {
+	sid := ""
 	if sid, ok := ctx.Value(CtxSessionID).(string); ok && sid != "" {
-		t.SetSessionID(sid)
+		return t.record(sid, model, vendor, durSec, usage)
 	}
-	return t.Record(model, vendor, durSec, usage)
+	return t.record(sid, model, vendor, durSec, usage)
 }
 
 func (t *Telemetry) SetThresholds(warnPct, compressPct int) {
@@ -174,11 +183,11 @@ func (t *Telemetry) FormatMap() map[string]any {
 	r := t.Last()
 	maxCtx := ModelContextWindow(r.Model)
 	m := map[string]any{
-		"duration":    fmt.Sprintf("%.0fs", r.Duration),
-		"model":       r.Model,
-		"in_tokens":   r.PromptTokens,
-		"out_tokens":  r.CompletionTokens,
-		"in_tokens_h": humanTok(r.PromptTokens),
+		"duration":     fmt.Sprintf("%.0fs", r.Duration),
+		"model":        r.Model,
+		"in_tokens":    r.PromptTokens,
+		"out_tokens":   r.CompletionTokens,
+		"in_tokens_h":  humanTok(r.PromptTokens),
 		"out_tokens_h": humanTok(r.CompletionTokens),
 	}
 	if maxCtx > 0 {

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
-	"sync"
+	"net/url"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
@@ -17,9 +19,9 @@ type MCPRequest struct {
 }
 
 type MCPResponse struct {
-	ID     string      `json:"id"`
-	Result any         `json:"result,omitempty"`
-	Error  *MCPError   `json:"error,omitempty"`
+	ID     string    `json:"id"`
+	Result any       `json:"result,omitempty"`
+	Error  *MCPError `json:"error,omitempty"`
 }
 
 type MCPError struct {
@@ -28,21 +30,26 @@ type MCPError struct {
 }
 
 type MCPServer struct {
-	tracker  *UsageTracker
-	upgrader websocket.Upgrader
-	mu       sync.RWMutex
+	tracker   *UsageTracker
+	upgrader  websocket.Upgrader
+	localOnly bool
 }
 
 func NewMCPServer(tracker *UsageTracker) *MCPServer {
 	return &MCPServer{
-		tracker: tracker,
+		tracker:   tracker,
+		localOnly: true,
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
+			CheckOrigin: allowLocalOrigin,
 		},
 	}
 }
 
 func (s *MCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.localOnly && !isLocalRequest(r) {
+		http.Error(w, "MCP is local-only", http.StatusForbidden)
+		return
+	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("MCP upgrade: %v", err)
@@ -105,7 +112,9 @@ func (s *MCPServer) handleGetDaily(params json.RawMessage) MCPResponse {
 		Until string `json:"until"`
 	}
 	if params != nil {
-		json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil {
+			return MCPResponse{Error: &MCPError{Code: -32602, Message: "invalid params"}}
+		}
 	}
 	stats, err := s.tracker.GetDailyStats(p.Since, p.Until)
 	if err != nil {
@@ -142,7 +151,9 @@ func (s *MCPServer) handleQueryRecords(params json.RawMessage) MCPResponse {
 	}
 	var q UsageQuery
 	if params != nil {
-		json.Unmarshal(params, &q)
+		if err := json.Unmarshal(params, &q); err != nil {
+			return MCPResponse{Error: &MCPError{Code: -32602, Message: "invalid params"}}
+		}
 	}
 	records, err := s.tracker.Query(q)
 	if err != nil {
@@ -152,5 +163,34 @@ func (s *MCPServer) handleQueryRecords(params json.RawMessage) MCPResponse {
 }
 
 func (s *MCPServer) sendError(conn *websocket.Conn, id string, code int, msg string) {
-	conn.WriteJSON(MCPResponse{ID: id, Error: &MCPError{Code: code, Message: msg}})
+	_ = conn.WriteJSON(MCPResponse{ID: id, Error: &MCPError{Code: code, Message: msg}})
+}
+
+func allowLocalOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
+}
+
+func isLocalRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return isLoopbackHost(host)
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

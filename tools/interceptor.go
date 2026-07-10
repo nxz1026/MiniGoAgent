@@ -11,8 +11,8 @@ type CommandContext struct {
 }
 
 type CommandResult struct {
-	Output   string
-	Err      error
+	Output string
+	Err    error
 }
 
 type Interceptor interface {
@@ -29,6 +29,9 @@ type InterceptorRegistry struct {
 var globalRegistry = &InterceptorRegistry{}
 
 func RegisterInterceptor(i Interceptor) {
+	if i == nil {
+		return
+	}
 	globalRegistry.mu.Lock()
 	defer globalRegistry.mu.Unlock()
 	globalRegistry.items = append(globalRegistry.items, i)
@@ -42,7 +45,7 @@ func ClearInterceptors() {
 
 func RunBeforeInterceptors(ctx context.Context, cmd CommandContext) (CommandContext, error) {
 	globalRegistry.mu.RLock()
-	items := globalRegistry.items
+	items := append([]Interceptor(nil), globalRegistry.items...)
 	globalRegistry.mu.RUnlock()
 	var err error
 	for _, i := range items {
@@ -56,7 +59,7 @@ func RunBeforeInterceptors(ctx context.Context, cmd CommandContext) (CommandCont
 
 func RunAfterInterceptors(ctx context.Context, cmd CommandContext, result CommandResult) CommandResult {
 	globalRegistry.mu.RLock()
-	items := globalRegistry.items
+	items := append([]Interceptor(nil), globalRegistry.items...)
 	globalRegistry.mu.RUnlock()
 	var err error
 	for _, i := range items {

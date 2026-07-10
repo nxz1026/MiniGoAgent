@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -15,6 +16,8 @@ type EventBus struct {
 	subs      map[string]chan Chunk
 	mu        sync.RWMutex
 	wg        sync.WaitGroup
+	stopOnce  sync.Once
+	stopped   bool
 }
 
 func NewEventBus(ctx context.Context, bufferSize int) *EventBus {
@@ -41,6 +44,11 @@ func (eb *EventBus) Subscribe(name string, p ChunkProcessor) error {
 }
 
 func (eb *EventBus) Publish(ctx context.Context, chunk Chunk) error {
+	eb.mu.RLock()
+	defer eb.mu.RUnlock()
+	if eb.stopped {
+		return fmt.Errorf("event bus stopped")
+	}
 	select {
 	case eb.publisher <- chunk:
 		return nil
@@ -50,6 +58,11 @@ func (eb *EventBus) Publish(ctx context.Context, chunk Chunk) error {
 }
 
 func (eb *EventBus) TryPublish(chunk Chunk) bool {
+	eb.mu.RLock()
+	defer eb.mu.RUnlock()
+	if eb.stopped {
+		return false
+	}
 	select {
 	case eb.publisher <- chunk:
 		return true
@@ -59,7 +72,16 @@ func (eb *EventBus) TryPublish(chunk Chunk) bool {
 }
 
 func (eb *EventBus) Stop() {
-	close(eb.publisher)
+	eb.stopOnce.Do(func() {
+		eb.mu.Lock()
+		eb.stopped = true
+		close(eb.publisher)
+		for name, ch := range eb.subs {
+			close(ch)
+			delete(eb.subs, name)
+		}
+		eb.mu.Unlock()
+	})
 	eb.wg.Wait()
 }
 

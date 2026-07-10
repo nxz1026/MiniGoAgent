@@ -437,3 +437,25 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
     - `MiniGoAgent/protocol`: 49 个测试全部通过
     - `MiniGoAgent/tools`: 10 个测试全部通过
     - `MiniGoAgent/tools/filter/log/sessionlog`: 无测试文件
+
+### 第十六轮（2026-07-10）：Review 修复 — 并发、安全、生命周期、文档一致性
+
+102. `protocol/telemetry.go`：修复 `RecordFromContext` 通过共享 `sessionID` 字段记录 usage 的并发串 session 风险；新增内部 `record(sessionID, ...)` 路径，context sessionID 直接传入写库；SQLite 写入移出 Telemetry mutex，避免 DB 阻塞 stats 读取
+103. `protocol/stream.go`：修复 `EventBus.Stop()` 死锁问题；新增 stopped 状态和 `sync.Once`，Stop 时关闭 publisher 和所有 subscriber channel；`Publish`/`TryPublish` 在 stopped 后返回失败
+104. `protocol/openai.go`：修复 stream 输出 channel 关闭职责，统一由 `streamWithFailover` 关闭，避免 reconnect 后向已关闭 channel 发送；stream 成功结束后触发 `RunAfterProcessHooks`；ctx 取消时保留 `lastErr`
+105. `protocol/mcp_server.go`：MCP WebSocket 默认本机限定；拒绝非 loopback `RemoteAddr`，Origin 仅允许空或 loopback；非法 params 返回 `-32602 invalid params`
+106. `protocol/usage_tracker.go` + `protocol/raw_query.go`：UsageTracker mutex 改为 `sync.RWMutex`；查询/扫描期间持读锁，`Close()` 等待读操作完成；查询默认 limit 上限 1000；整理 `UsageStats` 字段格式
+107. `main.go`：`USAGE_DB=1` 创建的 `UsageTracker` 在退出信号处理中关闭；所有 chat/vision handler 检查 JSON decode 错误并返回 400；Vision fallback 改用 request context；新增 `snapshotWith`/`appendMessages` 封装会话历史读取和追加，修复 user message 未可靠写回 session 以及并发 slice 读写风险
+108. `tools/fileops.go`：`GrepFiles` 从 `strings.Contains` 改为 `regexp.Compile` + `MatchString`，与“支持正则”的 schema 描述一致；接住 `filepath.Walk` 返回错误，ctx cancel 和结果截断不再静默丢失
+109. `protocol/raw_log.go`：检查 raw log 写入错误；失败后禁用 processor 并返回错误；新增日期字段，跨天运行自动轮转到新日志文件
+110. `protocol/hooks.go` + `tools/interceptor.go`：注册 nil hook/interceptor 时直接忽略；执行链复制切片后迭代，避免注册表并发修改影响当前执行；生命周期 hook 返回 nil request/response 时返回明确错误
+111. `protocol/health_check.go` + `protocol/health_manager.go`：HealthChecker Stop 使用 `sync.Once`，避免重复 close panic；HealthManager Stop 调用 cancel 终止 checker goroutine
+112. `README.md`：补充 `USAGE_DB`、`logs/raw/usage.db`、本机限定 `/mcp` WebSocket 配置说明，并清理中文功能列表重复项
+113. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 通过（MiniGoAgent / protocol / tools 全部 ok）；`go vet ./...` 通过
+
+### 第十七轮（2026-07-10）：RAW 层收口 — 关键回归测试补齐
+
+114. `protocol/protocol_test.go`：新增 `TestEventBus_StopDoesNotDeadlock`，验证 `EventBus.Stop()` 不再因 subscriber channel 未关闭而死锁，并验证 Stop 后 `TryPublish()` 返回 false
+115. `protocol/protocol_test.go`：新增 `TestTelemetry_RecordFromContextDoesNotShareSession`，并发写入两个 session 的 usage 记录，验证 `RecordFromContext` 不再通过共享 `Telemetry.sessionID` 串 session
+116. `protocol/usage_tracker.go`：回归测试暴露 SQLite 并发写丢记录问题；`UsageTracker.Record()` 改回独占 `Lock()` 串行写入，查询仍用 `RLock()`，确保 SQLite 写入稳定
+117. 验证：`gofmt` 已执行；`go build ./...` 通过；`go test ./protocol/ -run "TestTelemetry_RecordFromContextDoesNotShareSession|TestEventBus_StopDoesNotDeadlock" -count=1 -v` 通过；`go clean -testcache; go test ./... -count=1` 通过；`go vet ./...` 通过

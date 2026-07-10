@@ -39,6 +39,7 @@ func (m *HealthManager) Register(vendor Vendor, endpoint string, interval time.D
 func (m *HealthManager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.cancel()
 	for _, checker := range m.checkers {
 		checker.Stop()
 	}

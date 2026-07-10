@@ -25,7 +25,7 @@ type UsageRecord struct {
 
 type UsageTracker struct {
 	db *sql.DB
-	mu sync.Mutex
+	mu sync.RWMutex
 }
 
 func NewUsageTracker(dbPath string) (*UsageTracker, error) {
@@ -118,19 +118,25 @@ func (ut *UsageTracker) Query(filter UsageQuery) ([]UsageRecord, error) {
 	if limit <= 0 {
 		limit = 100
 	}
+	if limit > 1000 {
+		limit = 1000
+	}
 	offset := filter.Offset
 	if offset < 0 {
 		offset = 0
 	}
 	q := fmt.Sprintf("SELECT id, session_id, model, vendor, duration, prompt_tokens, completion_tokens, total_tokens, created_at FROM usage_records%s ORDER BY id DESC LIMIT ? OFFSET ?", where)
 	args = append(args, limit, offset)
-	ut.mu.Lock()
+	ut.mu.RLock()
 	rows, err := ut.db.Query(q, args...)
-	ut.mu.Unlock()
 	if err != nil {
+		ut.mu.RUnlock()
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		rows.Close()
+		ut.mu.RUnlock()
+	}()
 	var records []UsageRecord
 	for rows.Next() {
 		var r UsageRecord
@@ -143,19 +149,19 @@ func (ut *UsageTracker) Query(filter UsageQuery) ([]UsageRecord, error) {
 }
 
 type UsageStats struct {
-	TotalCalls   int     `json:"total_calls"`
-	AvgDuration  float64 `json:"avg_duration"`
-	TotalTokens  int     `json:"total_tokens"`
-	TotalPrompt  int     `json:"total_prompt"`
-	TotalCompletion int  `json:"total_completion"`
+	TotalCalls      int     `json:"total_calls"`
+	AvgDuration     float64 `json:"avg_duration"`
+	TotalTokens     int     `json:"total_tokens"`
+	TotalPrompt     int     `json:"total_prompt"`
+	TotalCompletion int     `json:"total_completion"`
 }
 
 func (ut *UsageTracker) GetStats() (UsageStats, error) {
-	ut.mu.Lock()
+	ut.mu.RLock()
 	row := ut.db.QueryRow(`SELECT COUNT(*), COALESCE(AVG(duration),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0) FROM usage_records`)
-	ut.mu.Unlock()
 	var s UsageStats
 	err := row.Scan(&s.TotalCalls, &s.AvgDuration, &s.TotalTokens, &s.TotalPrompt, &s.TotalCompletion)
+	ut.mu.RUnlock()
 	return s, err
 }
 

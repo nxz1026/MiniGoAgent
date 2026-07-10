@@ -29,6 +29,7 @@ type HealthChecker struct {
 	lastCheck          time.Time
 	breaker            *CircuitBreaker
 	stopCh             chan struct{}
+	stopOnce           sync.Once
 }
 
 func NewHealthChecker(vendor Vendor, endpoint string, interval time.Duration, breaker *CircuitBreaker) *HealthChecker {
@@ -61,7 +62,7 @@ func (h *HealthChecker) Start(ctx context.Context) {
 }
 
 func (h *HealthChecker) Stop() {
-	close(h.stopCh)
+	h.stopOnce.Do(func() { close(h.stopCh) })
 }
 
 func (h *HealthChecker) Status() HealthStatus {

@@ -22,6 +22,8 @@ Minimal LLM Agent powered by Go + [eino](https://github.com/cloudwego/eino) — 
 - Secret redaction: logs and raw output redact API keys, tokens, passwords
 - Model failover: primary model falls back to OPENAI_FALLBACK_MODEL on persistent errors
 - Raw HTTP logging: enable with RAW_LOG=1, writes to logs/raw/ (JSONL)
+- Usage analytics: enable with USAGE_DB=1, writes to logs/raw/usage.db
+- Local-only MCP WebSocket: enabled with USAGE_DB=1 at ws://localhost:PORT/mcp
 
 ---
 
@@ -77,6 +79,7 @@ docker run -p 8080:8080 \
 | `ALLOW_PRIVATE_URLS` | `false` | Allow localhost/LAN URLs (security risk) |
 | `RAW_LOG` | `0` | Enable raw HTTP logging (1=on) |
 | `RAW_LOG_DIR` | `logs/raw` | Raw log directory |
+| `USAGE_DB` | `0` | Enable SQLite usage analytics and local-only MCP endpoint |
 | `MAX_RECONNECT_ATTEMPTS` | `3` | SSE stream reconnect attempts |
 
 ---
@@ -111,9 +114,8 @@ See [README.detail.md](README.detail.md) for architecture, protocol layer, proje
 - Secret 脱敏：日志和原始输出自动脱敏 API key/token/password
 - 模型级 Failover：主模型持续失败时切换到 OPENAI_FALLBACK_MODEL
 - Raw HTTP 日志：RAW_LOG=1 启用，写入 logs/raw/（JSONL）
-- 流中断自动恢复：中途断线后静默重连补全，不丢对话上下文
-- Per-Host 连接池：共享 Transport，MaxConnsPerHost=50
-- 断路器：按供应商故障隔离 + 自动恢复
+- Usage 分析：USAGE_DB=1 启用，写入 logs/raw/usage.db
+- 本机限定 MCP WebSocket：USAGE_DB=1 后启用 ws://localhost:PORT/mcp
 
 ---
 
@@ -158,6 +160,7 @@ docker run -p 8080:8080 \
 | `ALLOW_PRIVATE_URLS` | `false` | 允许 localhost/LAN URL（安全风险） |
 | `RAW_LOG` | `0` | 启用原始 HTTP 日志（1=开启） |
 | `RAW_LOG_DIR` | `logs/raw` | 原始日志目录 |
+| `USAGE_DB` | `0` | 启用 SQLite 用量分析和本机限定 MCP 端点 |
 | `PORT` | `8080` | 服务端口 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `LOG_DIR` | `logs` | 日志目录 |

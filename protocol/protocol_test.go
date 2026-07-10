@@ -293,7 +293,7 @@ func TestMockStream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -318,7 +318,7 @@ func TestMockStreamReasoning(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "think step by step"}},
 	})
@@ -349,7 +349,7 @@ func TestMockStreamToolCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "weather"}},
 	})
@@ -379,7 +379,7 @@ func TestMockStreamReconnect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -415,7 +415,7 @@ func TestMockDisconnectNoRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := 	NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "test-model"})
 	ch, err := p.Stream(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
@@ -553,59 +553,59 @@ func TestMockStreamError(t *testing.T) {
 }
 
 func TestCircuitBreaker_Closed(t *testing.T) {
-    cb := &CircuitBreaker{
-        failureThreshold: 5,
-        failureRate:      0.6,
-        options: CircuitBreakerOptions{Timeout: time.Minute},
-    }
-    
-    testErr := fmt.Errorf("test error")
-    
-    // 在closed状态下，<threshold次失败不会触发open
-    for i := 0; i < 4; i++ {
-        if !cb.Check(testErr) {
-            t.Fatalf("expected success in closed state, got failure")
-        }
-    }
-    
-    // 第5次失败将触发状态转换为open
-    if cb.Check(testErr) {
-        t.Fatalf("expected closed->open transition")
-    }
+	cb := &CircuitBreaker{
+		failureThreshold: 5,
+		failureRate:      0.6,
+		options:          CircuitBreakerOptions{Timeout: time.Minute},
+	}
+
+	testErr := fmt.Errorf("test error")
+
+	// 在closed状态下，<threshold次失败不会触发open
+	for i := 0; i < 4; i++ {
+		if !cb.Check(testErr) {
+			t.Fatalf("expected success in closed state, got failure")
+		}
+	}
+
+	// 第5次失败将触发状态转换为open
+	if cb.Check(testErr) {
+		t.Fatalf("expected closed->open transition")
+	}
 }
 
 func TestCircuitBreaker_Open(t *testing.T) {
-    now := time.Now()
-    cb := &CircuitBreaker{
-        failureThreshold: 5,
-        failureRate:      0.6,
-        lastFailure:     now,
-        state:          Open,
-        options: CircuitBreakerOptions{Timeout: time.Minute},
-    }
-    
-    // open状态下，拒绝所有请求
-    for i := 0; i < 3; i++ {
-        if cb.Check(nil) {
-            t.Fatalf("expected rejection in open state")
-        }
-    }
+	now := time.Now()
+	cb := &CircuitBreaker{
+		failureThreshold: 5,
+		failureRate:      0.6,
+		lastFailure:      now,
+		state:            Open,
+		options:          CircuitBreakerOptions{Timeout: time.Minute},
+	}
+
+	// open状态下，拒绝所有请求
+	for i := 0; i < 3; i++ {
+		if cb.Check(nil) {
+			t.Fatalf("expected rejection in open state")
+		}
+	}
 }
 
 func TestCircuitBreaker_HalfOpen(t *testing.T) {
-    now := time.Now()
-    cb := &CircuitBreaker{
-        failureThreshold: 5,
-        failureRate:      0.6,
-        lastFailure:     now.Add(-10 * time.Second), // 足够早
-        state:          HalfOpen,
-        options: CircuitBreakerOptions{Timeout: time.Minute, HalfOpenMaxCalls: 5},
-    }
-    
-    // half-open状态允许后续请求
-    if !cb.Check(nil) {
-        t.Fatalf("expected success in half-open state")
-    }
+	now := time.Now()
+	cb := &CircuitBreaker{
+		failureThreshold: 5,
+		failureRate:      0.6,
+		lastFailure:      now.Add(-10 * time.Second), // 足够早
+		state:            HalfOpen,
+		options:          CircuitBreakerOptions{Timeout: time.Minute, HalfOpenMaxCalls: 5},
+	}
+
+	// half-open状态允许后续请求
+	if !cb.Check(nil) {
+		t.Fatalf("expected success in half-open state")
+	}
 }
 
 func TestStreamInterruptedError_Wrap(t *testing.T) {
@@ -713,9 +713,9 @@ func TestStreamInterruptedError_MockStreamEmitThenAPIError(t *testing.T) {
 
 func TestSanitizeTool(t *testing.T) {
 	tests := []struct {
-		input    ToolSchema
-		name     string
-		desc     string
+		input ToolSchema
+		name  string
+		desc  string
 	}{
 		{ToolSchema{Name: "", Description: ""}, "unnamed_tool", "user-defined tool"},
 		{ToolSchema{Name: "  ", Description: ""}, "unnamed_tool", "user-defined tool"},
@@ -740,7 +740,10 @@ func TestRetryNotifyContext(t *testing.T) {
 		max     int
 	}
 	notifyFn := func(attempt, max int) {
-		notifyCalls = append(notifyCalls, struct{ attempt int; max int }{attempt, max})
+		notifyCalls = append(notifyCalls, struct {
+			attempt int
+			max     int
+		}{attempt, max})
 	}
 	ctx := context.WithValue(context.Background(), CtxRetryNotify, notifyFn)
 
@@ -795,7 +798,7 @@ func TestSendWithRetry_CircuitBreakerAuthSuccess(t *testing.T) {
 	cb := &CircuitBreaker{
 		failureThreshold: 3,
 		failureRate:      1.0,
-		state:           HalfOpen,
+		state:            HalfOpen,
 		options:          CircuitBreakerOptions{Timeout: 5 * time.Minute},
 	}
 	vendorCircuitBreaker[VendorUnspecified] = cb
@@ -876,6 +879,27 @@ func TestEventBus_MultipleSubscribers(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if len(s1) != 1 || len(s2) != 1 {
 		t.Fatalf("expected both subscribers to receive 1 chunk, got s1=%d s2=%d", len(s1), len(s2))
+	}
+}
+
+func TestEventBus_StopDoesNotDeadlock(t *testing.T) {
+	eb := NewEventBus(context.Background(), 16)
+	eb.Subscribe("s1", &testProcessor{})
+	_ = eb.Publish(context.Background(), Chunk{Type: ChunkText, Text: "before-stop"})
+
+	done := make(chan struct{})
+	go func() {
+		eb.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("EventBus.Stop deadlocked")
+	}
+	if eb.TryPublish(Chunk{Type: ChunkText, Text: "after-stop"}) {
+		t.Fatal("TryPublish should fail after Stop")
 	}
 }
 
@@ -1447,3 +1471,47 @@ func TestUsageTracker_QueryPagination(t *testing.T) {
 	}
 }
 
+func TestTelemetry_RecordFromContextDoesNotShareSession(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "session_isolation.db")
+	ut, err := NewUsageTracker(dbPath)
+	if err != nil {
+		t.Fatalf("NewUsageTracker: %v", err)
+	}
+	defer ut.Close()
+
+	tel := NewTelemetry()
+	tel.SetTracker(ut)
+	tel.SetSessionID("fallback")
+
+	const callsPerSession = 25
+	var wg sync.WaitGroup
+	for _, sid := range []string{"session-a", "session-b"} {
+		sid := sid
+		ctx := context.WithValue(context.Background(), CtxSessionID, sid)
+		for i := 0; i < callsPerSession; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				tel.RecordFromContext(ctx, "gpt-4", "openai", 1, &Usage{PromptTokens: 10, CompletionTokens: 1})
+			}()
+		}
+	}
+	wg.Wait()
+
+	for _, sid := range []string{"session-a", "session-b"} {
+		records, err := ut.Query(UsageQuery{SessionID: sid, Limit: 100})
+		if err != nil {
+			t.Fatalf("Query %s: %v", sid, err)
+		}
+		if len(records) != callsPerSession {
+			t.Fatalf("expected %d records for %s, got %d", callsPerSession, sid, len(records))
+		}
+	}
+	records, err := ut.Query(UsageQuery{SessionID: "fallback", Limit: 100})
+	if err != nil {
+		t.Fatalf("Query fallback: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected no fallback records, got %d", len(records))
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -115,8 +116,12 @@ func GrepFiles(ctx context.Context, input GrepInput) (string, error) {
 	if root == "" {
 		root = "."
 	}
+	re, err := regexp.Compile(input.Pattern)
+	if err != nil {
+		return "", fmt.Errorf("正则表达式无效: %w", err)
+	}
 	var results []string
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -134,7 +139,7 @@ func GrepFiles(ctx context.Context, input GrepInput) (string, error) {
 		}
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
-			if strings.Contains(line, input.Pattern) {
+			if re.MatchString(line) {
 				rel, _ := filepath.Rel(root, path)
 				results = append(results, fmt.Sprintf("%s:%d: %s", rel, i+1, strings.TrimSpace(line)))
 			}
@@ -144,6 +149,9 @@ func GrepFiles(ctx context.Context, input GrepInput) (string, error) {
 		}
 		return nil
 	})
+	if err != nil && len(results) == 0 {
+		return "", err
+	}
 	if len(results) == 0 {
 		return "未找到匹配", nil
 	}
