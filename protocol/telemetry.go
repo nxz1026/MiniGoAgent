@@ -188,6 +188,11 @@ func ModelContextWindow(model string) int {
 		"claude-3-5-sonnet": 200000,
 		"deepseek-chat":     65536,
 		"deepseek-reasoner": 65536,
+		"step-2-16k":        16384,
+		"step-1-128k":       131072,
+		"qwen-turbo":        8192,
+		"qwen-plus":         32768,
+		"qwq-32b-preview":   32768,
 	}
 	if v, ok := m[model]; ok {
 		return v
@@ -197,6 +202,12 @@ func ModelContextWindow(model string) int {
 	}
 	if strings.Contains(model, "200k") || strings.Contains(model, "200K") {
 		return 200000
+	}
+	if strings.Contains(model, "step") || strings.Contains(model, "Step") {
+		return 128000
+	}
+	if strings.Contains(model, "qwen") || strings.Contains(model, "Qwen") {
+		return 32768
 	}
 	return 524288
 }

@@ -13,7 +13,8 @@ Minimal LLM Agent powered by Go + [eino](https://github.com/cloudwego/eino) — 
 - Command-aware output filter, 30s TTL result cache
 - Per-session `.md` logs, auto-save on Ctrl+C
 - Telemetry card inline in chat: `47s · auto · ↑92.7k · ↓1.4k · ctx 92.7k/524k 18%`
-- Multi-provider: OpenAI, DeepSeek, Zhipu, MiniMax, LongCat, Ollama Cloud, MiMo
+- Multi-provider: OpenAI, DeepSeek, Zhipu, MiniMax, LongCat, Ollama Cloud, MiMo, StepFun, Qwen
+- Vision: Native Mode (multimodal) for GPT-4o/DeepSeek-VL/Qwen-VL/Step-2, Tool Mode fallback for other models
 - Stream interruption auto-recovery: transparent fallback on mid-stream disconnect
 - Per-host connection pool: MaxConnsPerHost=50 with shared HTTP transport
 - Circuit breaker: per-vendor failure isolation and auto-recovery
@@ -92,7 +93,8 @@ See [README.detail.md](README.detail.md) for architecture, protocol layer, proje
 - 输出过滤 + 30s 缓存，命令感知
 - 每会话独立 .md 日志，Ctrl+C 自动保存
 - 统计卡片内联显示：`47s · auto · ↑92.7k · ↓1.4k · ctx 92.7k/524k 18%`
-- 多供应商：OpenAI、DeepSeek、Zhipu、MiniMax、LongCat、Ollama Cloud、MiMo
+- 多供应商：OpenAI、DeepSeek、Zhipu、MiniMax、LongCat、Ollama Cloud、MiMo、StepFun、Qwen
+- 图像识别：Native Mode（GPT-4o/DeepSeek-VL/Qwen-VL/Step-2 直通多模态），Tool Mode 降级
 - 流中断自动恢复：中途断线后静默重连补全，不丢对话上下文
 - Per-Host 连接池：共享 Transport，MaxConnsPerHost=50
 - 断路器：按供应商故障隔离 + 自动恢复

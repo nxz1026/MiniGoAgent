@@ -108,7 +108,7 @@ func NewOpenAI(cfg Config) *OpenAI {
 	switch o.vendor {
 	case VendorDeepSeek:
 		o.policy = reasoningThinking
-	case VendorZhipu, VendorMiniMax, VendorLongCat:
+	case VendorZhipu, VendorMiniMax, VendorLongCat, VendorMiMo, VendorStepFun, VendorQwen:
 		o.policy = reasoningThinking
 	default:
 		o.policy = reasoningEffort
@@ -393,12 +393,17 @@ func (o *OpenAI) toWireMessages(msgs []Message) []map[string]any {
 	liveIdx := findLiveZoneStart(msgs)
 	out := make([]map[string]any, 0, len(msgs))
 	for i, m := range msgs {
-		content := m.Content
-		if i >= liveIdx && (m.Role == RoleTool || m.Role == RoleUser) && len(content) > 512 {
-			ct := DetectContentType(content)
-			content = CachedCompressContent(content, ct)
+		item := map[string]any{"role": string(m.Role)}
+		if len(m.MultiContent) > 0 {
+			item["content"] = m.MultiContent
+		} else {
+			content := m.Content
+			if i >= liveIdx && (m.Role == RoleTool || m.Role == RoleUser) && len(content) > 512 {
+				ct := DetectContentType(content)
+				content = CachedCompressContent(content, ct)
+			}
+			item["content"] = content
 		}
-		item := map[string]any{"role": string(m.Role), "content": content}
 		if len(m.ToolCalls) > 0 {
 			tcs := make([]map[string]any, len(m.ToolCalls))
 			for i, tc := range m.ToolCalls {
@@ -537,7 +542,7 @@ func (o *OpenAI) buildThinkingFields(m map[string]any) {
 				t = "enabled"
 			}
 			m["thinking"] = map[string]string{"type": t}
-		case VendorLongCat:
+		case VendorLongCat, VendorMiMo, VendorStepFun, VendorQwen:
 			t = o.thinkingType
 			if t == "" {
 				t = "enabled"

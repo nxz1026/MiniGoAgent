@@ -101,27 +101,54 @@ async function send() {
     document.getElementById('messages').appendChild(loading)
 
     try {
-      const res = await fetch('/api/vision', {
+      const res = await fetch('/api/vision/native', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({image: img, prompt: text || '描述这张图片'})
       })
-      const data = await res.json()
+      if (!res.ok) {
+        throw new Error('HTTP ' + res.status)
+      }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let full = ''
+      while (true) {
+        const {done, value} = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, {stream: true})
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop()
+        for (const part of parts) {
+          for (const line of part.split('\n')) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6)
+              try {
+                const parsed = JSON.parse(data)
+                if (parsed.error) {
+                  loading.textContent = '错误: ' + parsed.error
+                  break
+                }
+                if (parsed.content) {
+                  full += parsed.content
+                  bubble.innerHTML = marked(full)
+                  const existingStats = bubble.querySelector('.stats')
+                  if (existingStats) existingStats.remove()
+                }
+              } catch(e) {}
+            }
+          }
+        }
+      }
       loading.remove()
-      const bubble = document.createElement('div')
-      bubble.className = 'msg agent'
-      bubble.innerHTML = marked(data.reply)
-      if (data.stats) {
-        const s = data.stats
+      if (!full) {
+        bubble.textContent = '（空回复）'
+      } else {
         const statsDiv = document.createElement('div')
         statsDiv.className = 'stats'
-        statsDiv.innerHTML = '<span>' + s.duration + '</span><span>' + s.model + '</span>'
-        if (s.in_tokens_h) statsDiv.innerHTML += '<span>\u2191' + s.in_tokens_h + '</span>'
-        if (s.out_tokens_h) statsDiv.innerHTML += '<span>\u2193' + s.out_tokens_h + '</span>'
-        if (s.ctx_max_h) statsDiv.innerHTML += '<span>ctx ' + s.in_tokens_h + '/' + s.ctx_max_h + ' ' + s.ctx_pct + '</span>'
+        statsDiv.innerHTML = '<span>Native Vision</span>'
         bubble.appendChild(statsDiv)
       }
-      document.getElementById('messages').appendChild(bubble)
     } catch (e) {
       loading.remove()
       addMsg('请求失败: ' + e.message, 'agent')

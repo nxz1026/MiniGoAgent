@@ -38,6 +38,7 @@ type Message struct {
 	ToolCalls        []ToolCall
 	ToolCallID       string
 	Name             string
+	MultiContent     []map[string]any
 }
 
 type Request struct {

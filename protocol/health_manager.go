@@ -62,9 +62,20 @@ func (m *HealthManager) GetStatus(vendor Vendor) HealthStatus {
 	return status
 }
 
+func (m *HealthManager) setCheckerStatus(vendor Vendor, status HealthStatus) {
+	m.mu.RLock()
+	checker, ok := m.checkers[vendor]
+	m.mu.RUnlock()
+	if ok {
+		checker.mu.Lock()
+		checker.status = status
+		checker.mu.Unlock()
+	}
+}
+
 func defaultHealthEndpoint(v Vendor, baseURL string) string {
 	switch v {
-	case VendorDeepSeek, VendorZhipu, VendorMiniMax, VendorLongCat, VendorOllamaCloud, VendorMiMo:
+	case VendorDeepSeek, VendorZhipu, VendorMiniMax, VendorLongCat, VendorOllamaCloud, VendorMiMo, VendorStepFun, VendorQwen:
 		return baseURL + "/models"
 	case VendorUnspecified:
 		return baseURL + "/models"

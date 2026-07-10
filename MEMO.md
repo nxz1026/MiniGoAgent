@@ -2,7 +2,9 @@
 
 > 最后更新：2026-07-09
 > 用途：给 LLM 提供完整项目上下文，避免重复发现
-
+> 铁律1：任何时候思考都用中文
+> 铁律2：每次阶段任务完成后迭代2个本文档（MEMO.md）
+> 铁律3：迭代本文档不删除，只添加
 ---
 
 ## 项目概述
@@ -354,3 +356,23 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 57. `tools/cache_test.go` + `tools/compress_test.go` + `tools/fileops_test.go` + `tools/vision_test.go`：新增 6 个 smoke test
 58. `reference/eino`/`reference/hermes-agent`/`reference/opencode`：克隆上游仓库到 `reference/` 目录，go.mod replace 路径改为 `./reference/eino`
 59. `README.md` + `README.detail.md` + `MEMO.md`：文档同步更新（EventBus/Health/ContentPredictor/Telemetry 增强/测试计数/reference 目录说明）
+
+### 第七轮（2026-07-10）：供应商测试补全 + StepFun/Qwen 接入 + Vision Native Mode
+
+60. `protocol/protocol_test.go`：补全 vendor-specific 测试覆盖
+   - `TestBuildThinkingFields`：验证 DeepSeek/MiniMax/Zhipu/LongCat/MiMo/OllamaCloud 的 reasoning 字段生成
+   - `TestMockStream_DeepSeek` / `TestMockStream_MiniMax` / `TestMockStream_Zhipu` / `TestMockStream_LongCat` / `TestMockStream_MiMo` / `TestMockStream_OllamaCloud`：6 个 vendor mock SSE 流测试，验证 `ChunkText` + `ChunkReasoning` 正确分离
+61. `protocol/host.go`：新增 `VendorStepFun` / `VendorQwen` + `IsStepFun()` / `IsQwen()` 检测
+62. `protocol/openai.go`：`buildThinkingFields` + `NewOpenAI` policy 初始化 + `defaultHealthEndpoint` 均纳入 StepFun/Qwen
+63. `protocol/telemetry.go`：`ModelContextWindow` 增加 StepFun/Qwen 模型 context 映射
+64. `protocol/stream.go`：修复 `EventBus` 在 `Stop()` 后 `send on closed channel` panic（`dispatch` goroutine 不再向已关闭的 publisher 发送）
+65. `main.go`：Vision Native Mode 实现
+   - `supportsVision(model)` 判断模型是否原生支持视觉（GPT-4o/DeepSeek-VL/Qwen-VL/Step-2/Gemini）
+   - `handleVisionFromChat`：`/api/chat` 路由图片直通主模型，不走 `/api/vision`
+   - `handleVisionNativeStream`：`/api/vision/native` 新端点，SSE 流式返回分析结果
+   - `imageToDataURL` / `fetchImageDataURL`：统一处理 data URI / HTTP URL / 本地路径三种图片源
+   - `toProtoMsg`：支持 `UserInputMultiContent` 多模态消息序列化
+66. `main.go`：`chatServer` 新增 `llm.model` 访问；`strPtr` 辅助函数；`MessageInputImage` 使用 `MessagePartCommon` 嵌入
+67. `frontend/index.html`：图片粘贴改为调用 `/api/vision/native`，实时流式渲染分析结果
+68. `protocol/protocol_test.go`：`TestDetectVendor` 增加 StepFun + Qwen 用例；修复 `TestEventBus_*` 同步时序问题；修复 `TestSendWithRetry_HealthShortCircuit` 使用 `setCheckerStatus` 替代直接修改
+69. `protocol/health_manager.go`：新增 `setCheckerStatus(vendor, status)` 方法供测试注入状态

@@ -23,7 +23,7 @@ func NewEventBus(ctx context.Context, bufferSize int) *EventBus {
 		subs:      make(map[string]chan Chunk),
 	}
 	eb.wg.Add(1)
-	go eb.run(ctx)
+	go eb.run()
 	return eb
 }
 
@@ -54,7 +54,7 @@ func (eb *EventBus) Stop() {
 	eb.wg.Wait()
 }
 
-func (eb *EventBus) run(ctx context.Context) {
+func (eb *EventBus) run() {
 	defer eb.wg.Done()
 	for chunk := range eb.publisher {
 		eb.mu.RLock()
@@ -73,9 +73,6 @@ func (eb *EventBus) dispatch(name string, p ChunkProcessor, ch <-chan Chunk) {
 	for chunk := range ch {
 		_ = p.Process(context.Background(), chunk)
 	}
-	eb.mu.Lock()
-	delete(eb.subs, name)
-	eb.mu.Unlock()
 }
 
 type telemetryProcessor struct {

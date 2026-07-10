@@ -15,6 +15,8 @@ const (
 	VendorZhipu
 	VendorLongCat
 	VendorOllamaCloud
+	VendorStepFun
+	VendorQwen
 )
 
 func matchesVendorHost(baseURL, apex string, canonicals ...string) bool {
@@ -56,6 +58,14 @@ func IsOllamaCloud(baseURL string) bool {
 	return matchesVendorHost(baseURL, "ollama.com", "ollama.com")
 }
 
+func IsStepFun(baseURL string) bool {
+	return matchesVendorHost(baseURL, "stepfun.com", "api.stepfun.com")
+}
+
+func IsQwen(baseURL string) bool {
+	return matchesVendorHost(baseURL, "aliyuncs.com", "dashscope.aliyuncs.com")
+}
+
 func (v Vendor) String() string {
 	switch v {
 	case VendorDeepSeek:
@@ -70,6 +80,10 @@ func (v Vendor) String() string {
 		return "longcat"
 	case VendorOllamaCloud:
 		return "ollama"
+	case VendorStepFun:
+		return "stepfun"
+	case VendorQwen:
+		return "qwen"
 	default:
 		return "openai"
 	}
@@ -89,6 +103,10 @@ func DetectVendor(baseURL string) Vendor {
 		return VendorLongCat
 	case IsOllamaCloud(baseURL):
 		return VendorOllamaCloud
+	case IsStepFun(baseURL):
+		return VendorStepFun
+	case IsQwen(baseURL):
+		return VendorQwen
 	default:
 		return VendorUnspecified
 	}

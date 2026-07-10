@@ -69,6 +69,26 @@ func toProtoMsg(m *schema.Message) protocol.Message {
 		ToolCallID:       m.ToolCallID,
 		Name:             m.Name,
 	}
+	if len(m.UserInputMultiContent) > 0 {
+		pm.MultiContent = make([]map[string]any, 0, len(m.UserInputMultiContent))
+		for _, part := range m.UserInputMultiContent {
+			item := map[string]any{"type": string(part.Type)}
+			if part.Text != "" {
+				item["text"] = part.Text
+			}
+			if part.Image != nil {
+				img := map[string]any{}
+				if part.Image.URL != nil {
+					img["url"] = *part.Image.URL
+				}
+				if part.Image.Base64Data != nil {
+					img["url"] = "data:" + part.Image.MIMEType + ";base64," + *part.Image.Base64Data
+				}
+				item["image_url"] = img
+			}
+			pm.MultiContent = append(pm.MultiContent, item)
+		}
+	}
 	for _, tc := range m.ToolCalls {
 		pm.ToolCalls = append(pm.ToolCalls, protocol.ToolCall{
 			ID: tc.ID, Type: tc.Type, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
@@ -275,6 +295,7 @@ func main() {
 	http.HandleFunc("/api/chat", srv.handleChat)
 	http.HandleFunc("/api/chat/stream", srv.handleChatStream)
 	http.HandleFunc("/api/vision", srv.handleVision)
+	http.HandleFunc("/api/vision/native", srv.handleVisionNativeStream)
 
 	port := getEnv("PORT", "8080")
 	log.Info("MiniGoAgent UI: http://localhost:%s", port)
@@ -456,7 +477,7 @@ func (s *chatServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// route to vision if it's an image
 	if strings.HasPrefix(req.Message, "data:image/") {
-		s.handleVisionInternal(r.Context(), w, sid, req.Message, "描述这张图片")
+		s.handleVisionFromChat(w, r, sid, req.Message, "描述这张图片")
 		return
 	}
 
@@ -495,22 +516,18 @@ func (s *chatServer) handleVision(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&req)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sid := s.sessionID(r)
-	s.handleVisionInternal(r.Context(), w, sid, req.Image, req.Prompt)
-}
+	msgs := s.messages(sid)
+	s.mu.Unlock()
 
-func (s *chatServer) handleVisionInternal(ctx context.Context, w http.ResponseWriter, sid, img, prompt string) {
-	visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: img, Prompt: prompt})
+	visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "Vision 错误: " + err.Error()})
 		return
 	}
-	userMsg := "用户上传了一张图片，提问：" + prompt + "\n\n图片分析结果：\n" + visionResult
-	msg := schema.UserMessage(userMsg)
-	msgs := s.messages(sid)
-	msgs = append(msgs, msg)
-	ctx = s.injectLogCtx(ctx, sid)
+	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + req.Prompt + "\n\n图片分析结果：\n" + visionResult)
+	msgs = append(msgs, userMsg)
+	ctx := s.injectLogCtx(r.Context(), sid)
 	result, err := s.agent.Generate(ctx, msgs)
 	if err != nil {
 		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
@@ -522,6 +539,171 @@ func (s *chatServer) handleVisionInternal(ctx context.Context, w http.ResponseWr
 	s.sessions[sid] = msgs
 	s.mu.Unlock()
 	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
+}
+
+func (s *chatServer) handleVisionFromChat(w http.ResponseWriter, r *http.Request, sid, img, prompt string) {
+	ctx := s.injectLogCtx(r.Context(), sid)
+	if supportsVision(s.llm.model) {
+		dataURL, err := imageToDataURL(ctx, img)
+		if err != nil {
+			json.NewEncoder(w).Encode(chatResp{Reply: "图片处理失败: " + err.Error()})
+			return
+		}
+		textPart := schema.MessageInputPart{
+			Type: schema.ChatMessagePartTypeText,
+			Text: prompt,
+		}
+		imagePart := schema.MessageInputPart{
+			Type: schema.ChatMessagePartTypeImageURL,
+		Image: &schema.MessageInputImage{
+			MessagePartCommon: schema.MessagePartCommon{URL: strPtr(dataURL)},
+		},
+		}
+		userMsg := &schema.Message{
+			Role:                  schema.User,
+			Content:               "[图片] " + prompt,
+			UserInputMultiContent: []schema.MessageInputPart{textPart, imagePart},
+		}
+		msgs := s.messages(sid)
+		msgs = append(msgs, userMsg)
+		result, err := s.agent.Generate(ctx, msgs)
+		if err != nil {
+			json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
+			return
+		}
+		s.mu.Lock()
+		msgs = s.messages(sid)
+		msgs = append(msgs, result)
+		s.sessions[sid] = msgs
+		s.mu.Unlock()
+		json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
+		return
+	}
+	visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: img, Prompt: prompt})
+	if err != nil {
+		json.NewEncoder(w).Encode(chatResp{Reply: "Vision 错误: " + err.Error()})
+		return
+	}
+	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + prompt + "\n\n图片分析结果：\n" + visionResult)
+	msgs := s.messages(sid)
+	msgs = append(msgs, userMsg)
+	result, err := s.agent.Generate(ctx, msgs)
+	if err != nil {
+		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
+		return
+	}
+	s.mu.Lock()
+	msgs = s.messages(sid)
+	msgs = append(msgs, result)
+	s.sessions[sid] = msgs
+	s.mu.Unlock()
+	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
+}
+
+func (s *chatServer) handleVisionNativeStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var req visionReq
+	json.NewDecoder(r.Body).Decode(&req)
+
+	s.mu.Lock()
+	sid := s.sessionID(r)
+	msgs := s.messages(sid)
+	s.mu.Unlock()
+
+	s.logUserMessage(sid, "[图片] "+req.Prompt)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", 500)
+		return
+	}
+
+	ctx := s.injectLogCtx(r.Context(), sid)
+
+	if !supportsVision(s.llm.model) {
+		visionResult, err := tools.RunVision(context.Background(), tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
+		if err != nil {
+			fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
+			flusher.Flush()
+			return
+		}
+		data, _ := json.Marshal(map[string]any{"content": "图片分析结果：\n" + visionResult})
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+
+		s.mu.Lock()
+		msgs = s.messages(sid)
+		msgs = append(msgs, schema.UserMessage("[图片] "+req.Prompt+"\n\n图片分析结果：\n"+visionResult))
+		msgs = append(msgs, &schema.Message{Role: schema.Assistant, Content: visionResult})
+		s.sessions[sid] = msgs
+		s.mu.Unlock()
+		return
+	}
+
+	dataURL, err := imageToDataURL(ctx, req.Image)
+	if err != nil {
+		fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	textPart := schema.MessageInputPart{
+		Type: schema.ChatMessagePartTypeText,
+		Text: req.Prompt,
+	}
+	imagePart := schema.MessageInputPart{
+		Type: schema.ChatMessagePartTypeImageURL,
+		Image: &schema.MessageInputImage{
+			MessagePartCommon: schema.MessagePartCommon{URL: strPtr(dataURL)},
+		},
+	}
+	userMsg := &schema.Message{
+		Role:                  schema.User,
+		Content:               "[图片] " + req.Prompt,
+		UserInputMultiContent: []schema.MessageInputPart{textPart, imagePart},
+	}
+	msgs = append(msgs, userMsg)
+
+	stream, err := s.agent.Stream(ctx, msgs)
+	if err != nil {
+		fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+	defer stream.Close()
+
+	var fullContent strings.Builder
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		data, _ := json.Marshal(map[string]any{"content": chunk.Content})
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		fullContent.WriteString(chunk.Content)
+	}
+
+	resultMsg := &schema.Message{Role: schema.Assistant, Content: fullContent.String()}
+	s.mu.Lock()
+	msgs = s.messages(sid)
+	msgs = append(msgs, resultMsg)
+	s.sessions[sid] = msgs
+	s.mu.Unlock()
+
+	if statsJSON := s.llm.StatsJSON(); statsJSON != "" {
+		fmt.Fprintf(w, "data: %s\n\n", statsJSON)
+		flusher.Flush()
+	}
 }
 
 // ---------- history persistence (DTO isolated from eino types) ----------
@@ -664,6 +846,86 @@ func extractLocalImagePath(input string) string {
 	return ""
 }
 
+func imageToDataURL(ctx context.Context, img string) (string, error) {
+	if strings.HasPrefix(img, "data:") {
+		return img, nil
+	}
+	if strings.HasPrefix(img, "http://") || strings.HasPrefix(img, "https://") {
+		data, err := fetchImageDataURL(ctx, img)
+		if err != nil {
+			return "", fmt.Errorf("download image: %w", err)
+		}
+		return data, nil
+	}
+	localPath := extractLocalImagePath(img)
+	if localPath == "" {
+		return "", fmt.Errorf("invalid image path: %s", img)
+	}
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return "", fmt.Errorf("read image: %w", err)
+	}
+	ext := strings.ToLower(filepath.Ext(localPath))
+	mime := "image/png"
+	switch ext {
+	case ".jpg", ".jpeg":
+		mime = "image/jpeg"
+	case ".gif":
+		mime = "image/gif"
+	case ".webp":
+		mime = "image/webp"
+	case ".bmp":
+		mime = "image/bmp"
+	case ".svg":
+		mime = "image/svg+xml"
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
+func fetchImageDataURL(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+	client := protocol.NewHTTPClient(30 * time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = http.DetectContentType(data)
+	}
+	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
+func supportsVision(model string) bool {
+	lower := strings.ToLower(model)
+	visionModels := []string{
+		"gpt-4o", "gpt-4o-mini", "gpt-4-turbo",
+		"claude-3", "claude-3-5", "claude-sonnet-4", "claude-opus-4",
+		"deepseek-vl", "deepseek-vl2",
+		"qwen-vl", "qwen2-vl", "qwq",
+		"step-2",
+		"gemini",
+	}
+	for _, vm := range visionModels {
+		if strings.Contains(lower, vm) {
+			return true
+		}
+	}
+	return false
+}
+
 func loadEnv() {
 	data, err := os.ReadFile(".env")
 	if err != nil {
@@ -699,6 +961,10 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func strPtr(s string) *string {
+	return &s
 }
 
 func splitEnv(key string) []string {

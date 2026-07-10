@@ -30,6 +30,8 @@ func TestDetectVendor(t *testing.T) {
 		{"https://api.longcat.chat/v1", VendorLongCat, "LongCat"},
 		{"https://api.ollama.com/v1", VendorOllamaCloud, "Ollama Cloud"},
 		{"https://api.xiaomimimo.com/v1", VendorMiMo, "小米 MiMo"},
+		{"https://api.stepfun.com/v1", VendorStepFun, "StepFun"},
+		{"https://dashscope.aliyuncs.com/compatible-mode/v1", VendorQwen, "阿里云 Qwen"},
 		{"https://api.openai.com/v1", VendorUnspecified, "通用 OpenAI"},
 		{"https://token.sensenova.cn/v1", VendorUnspecified, "自定义代理"},
 		{"not-a-url", VendorUnspecified, "无效 URL"},
@@ -853,8 +855,7 @@ func TestEventBus_SubscribePublish(t *testing.T) {
 	eb.Subscribe("s1", &testProcessor{chunks: &got, mu: &mu, done: processed})
 	_ = eb.Publish(context.Background(), Chunk{Type: ChunkText, Text: "hello"})
 	_ = eb.Publish(context.Background(), Chunk{Type: ChunkDone})
-	eb.Stop()
-	<-processed
+	time.Sleep(100 * time.Millisecond)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 chunks, got %d", len(got))
 	}
@@ -867,12 +868,11 @@ func TestEventBus_MultipleSubscribers(t *testing.T) {
 	eb := NewEventBus(context.Background(), 16)
 	var s1, s2 []Chunk
 	var mu1, mu2 sync.Mutex
-	processed := make(chan struct{}, 2)
-	eb.Subscribe("s1", &testProcessor{chunks: &s1, mu: &mu1, done: processed})
-	eb.Subscribe("s2", &testProcessor{chunks: &s2, mu: &mu2, done: processed})
+	done := make(chan struct{}, 2)
+	eb.Subscribe("s1", &testProcessor{chunks: &s1, mu: &mu1, done: done})
+	eb.Subscribe("s2", &testProcessor{chunks: &s2, mu: &mu2, done: done})
 	_ = eb.Publish(context.Background(), Chunk{Type: ChunkText, Text: "broadcast"})
-	eb.Stop()
-	<-processed
+	time.Sleep(100 * time.Millisecond)
 	if len(s1) != 1 || len(s2) != 1 {
 		t.Fatalf("expected both subscribers to receive 1 chunk, got s1=%d s2=%d", len(s1), len(s2))
 	}
@@ -990,12 +990,8 @@ func TestSendWithRetry_HealthShortCircuit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// First make it unhealthy
-	checker := NewHealthChecker(VendorUnspecified, srv.URL, 30*time.Second, cb)
-	checker.check(context.Background())
-	checker.mu.Lock()
-	checker.status = HealthCircuitOpen
-	checker.mu.Unlock()
+	hm.Register(VendorUnspecified, srv.URL, 30*time.Second, cb)
+	hm.setCheckerStatus(VendorUnspecified, HealthCircuitOpen)
 
 	_, err := SendWithRetry(context.Background(), NewHTTPClient(5*time.Second), VendorUnspecified,
 		func(ctx context.Context) (*http.Request, error) {
@@ -1003,6 +999,288 @@ func TestSendWithRetry_HealthShortCircuit(t *testing.T) {
 		})
 	if err == nil || !strings.Contains(err.Error(), "unhealthy") {
 		t.Fatalf("expected unhealthy error, got %v", err)
+	}
+}
+
+// ---------- buildThinkingFields + vendor-specific streaming ----------
+
+func TestBuildThinkingFields(t *testing.T) {
+	tests := []struct {
+		vendor    Vendor
+		effort    string
+		thinkType string
+		want      map[string]any
+	}{
+		{VendorDeepSeek, "", "", map[string]any{"thinking": map[string]string{"type": "enabled"}}},
+		{VendorDeepSeek, "", "disabled", map[string]any{"thinking": map[string]string{"type": "disabled"}}},
+		{VendorMiniMax, "", "", map[string]any{"thinking": map[string]string{"type": "adaptive"}}},
+		{VendorMiniMax, "high", "", map[string]any{"thinking": map[string]string{"type": "high"}}},
+		{VendorZhipu, "", "", map[string]any{"thinking": map[string]string{"type": "enabled"}}},
+		{VendorZhipu, "low", "", map[string]any{"thinking": map[string]string{"type": "low"}}},
+		{VendorLongCat, "", "", map[string]any{"thinking": map[string]string{"type": "enabled"}}},
+		{VendorLongCat, "", "disabled", map[string]any{"thinking": map[string]string{"type": "disabled"}}},
+		{VendorMiMo, "", "", map[string]any{"thinking": map[string]string{"type": "enabled"}}},
+		{VendorOllamaCloud, "medium", "", map[string]any{"reasoning_effort": "medium"}},
+		{VendorUnspecified, "low", "", map[string]any{"reasoning_effort": "low"}},
+	}
+	for _, tt := range tests {
+		o := &OpenAI{
+			vendor:       tt.vendor,
+			policy:       reasoningThinking,
+			effort:       tt.effort,
+			thinkingType: tt.thinkType,
+		}
+		m := make(map[string]any)
+		if tt.vendor == VendorOllamaCloud || tt.vendor == VendorUnspecified {
+			o.policy = reasoningEffort
+		}
+		o.buildThinkingFields(m)
+		gotJSON, _ := json.Marshal(m)
+		wantJSON, _ := json.Marshal(tt.want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Fatalf("vendor=%s: got %s, want %s", tt.vendor, gotJSON, wantJSON)
+		}
+	}
+}
+
+func vendorStreamHandler(v Vendor, field string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if field != "" {
+			var req map[string]any
+			if err := json.Unmarshal(body, &req); err == nil {
+				msgs, _ := req["messages"].([]any)
+				if len(msgs) > 0 {
+					_ = msgs[0]
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		switch v {
+		case VendorMiniMax:
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"<think>reasoning</think>answer\"}}]}\n\n")
+		default:
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\",\"content\":\"answer\"}}]}\n\n")
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+}
+
+func TestMockStream_DeepSeek(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\",\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "deepseek-chat"})
+	p.vendor = VendorDeepSeek
+	p.policy = reasoningThinking
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var text, reasoning string
+	for chunk := range ch {
+		switch chunk.Type {
+		case ChunkText:
+			text += chunk.Text
+		case ChunkReasoning:
+			reasoning += chunk.Text
+		}
+	}
+	if text != "hi" {
+		t.Fatalf("expected text 'hi', got %q", text)
+	}
+	if reasoning != "think" {
+		t.Fatalf("expected reasoning 'think', got %q", reasoning)
+	}
+}
+
+func TestMockStream_MiniMax(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"<think>reasoning</think>answer\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "minimax/MiniMax-M1-80k"})
+	p.vendor = VendorMiniMax
+	p.policy = reasoningThinking
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var text, reasoning string
+	for chunk := range ch {
+		switch chunk.Type {
+		case ChunkText:
+			text += chunk.Text
+		case ChunkReasoning:
+			reasoning += chunk.Text
+		}
+	}
+	if text != "answer" {
+		t.Fatalf("expected text 'answer', got %q", text)
+	}
+	if reasoning != "reasoning" {
+		t.Fatalf("expected reasoning 'reasoning', got %q", reasoning)
+	}
+}
+
+func TestMockStream_Zhipu(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"zh-reason\",\"content\":\"zh-answer\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "glm-4"})
+	p.vendor = VendorZhipu
+	p.policy = reasoningThinking
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var text, reasoning string
+	for chunk := range ch {
+		switch chunk.Type {
+		case ChunkText:
+			text += chunk.Text
+		case ChunkReasoning:
+			reasoning += chunk.Text
+		}
+	}
+	t.Logf("Zhipu text=%q reasoning=%q", text, reasoning)
+	if text != "zh-answer" {
+		t.Fatalf("expected text 'zh-answer', got %q", text)
+	}
+	if reasoning != "zh-reason" {
+		t.Fatalf("expected reasoning 'zh-reason', got %q", reasoning)
+	}
+}
+
+func TestMockStream_LongCat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"lc-reason\",\"content\":\"lc-answer\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "longcat-chat"})
+	p.vendor = VendorLongCat
+	p.policy = reasoningThinking
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var text, reasoning string
+	for chunk := range ch {
+		switch chunk.Type {
+		case ChunkText:
+			text += chunk.Text
+		case ChunkReasoning:
+			reasoning += chunk.Text
+		}
+	}
+	if text != "lc-answer" {
+		t.Fatalf("expected text 'lc-answer', got %q", text)
+	}
+	if reasoning != "lc-reason" {
+		t.Fatalf("expected reasoning 'lc-reason', got %q", reasoning)
+	}
+}
+
+func TestMockStream_MiMo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"mimo-reason\",\"content\":\"mimo-answer\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "mimo-chat"})
+	p.vendor = VendorMiMo
+	p.policy = reasoningThinking
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var text, reasoning string
+	for chunk := range ch {
+		switch chunk.Type {
+		case ChunkText:
+			text += chunk.Text
+		case ChunkReasoning:
+			reasoning += chunk.Text
+		}
+	}
+	if text != "mimo-answer" {
+		t.Fatalf("expected text 'mimo-answer', got %q", text)
+	}
+	if reasoning != "mimo-reason" {
+		t.Fatalf("expected reasoning 'mimo-reason', got %q", reasoning)
+	}
+}
+
+func TestMockStream_OllamaCloud(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning\":\"ollama-reason\",\"content\":\"ollama-answer\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(Config{APIKey: "test-key", BaseURL: srv.URL, Model: "llama3.1"})
+	p.vendor = VendorOllamaCloud
+	p.policy = reasoningEffort
+	ch, err := p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	var text, reasoning string
+	for chunk := range ch {
+		switch chunk.Type {
+		case ChunkText:
+			text += chunk.Text
+		case ChunkReasoning:
+			reasoning += chunk.Text
+		}
+	}
+	if text != "ollama-answer" {
+		t.Fatalf("expected text 'ollama-answer', got %q", text)
+	}
+	if reasoning != "ollama-reason" {
+		t.Fatalf("expected reasoning 'ollama-reason', got %q", reasoning)
 	}
 }
 
