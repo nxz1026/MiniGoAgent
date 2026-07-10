@@ -272,6 +272,20 @@ func main() {
 			log.Info("RAW 日志已启用: %s", getEnv("RAW_LOG_DIR", "logs/raw"))
 		}
 	}
+	var mcpServer *protocol.MCPServer
+	if getEnv("USAGE_DB", "") == "1" {
+		usageTracker, utErr := protocol.NewUsageTracker("logs/raw/usage.db")
+		if utErr != nil {
+			log.Warn("Usage 数据库初始化失败: %v", utErr)
+		} else {
+			type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
+			if p, ok := proto.(statsProvider); ok {
+				p.GetTelemetry().SetTracker(usageTracker)
+				log.Info("Usage 追踪已启用: logs/raw/usage.db")
+			}
+			mcpServer = protocol.NewMCPServer(usageTracker)
+		}
+	}
 	llm := &chatModel{proto: proto, model: getEnv("OPENAI_MODEL", "deepseek-v4-flash")}
 
 	terminalTool, _ := utils.InferTool("terminal", "在 Windows 终端执行 shell 命令", tools.RunTerminal)
@@ -311,6 +325,10 @@ func main() {
 	http.HandleFunc("/api/chat/stream", srv.handleChatStream)
 	http.HandleFunc("/api/vision", srv.handleVision)
 	http.HandleFunc("/api/vision/native", srv.handleVisionNativeStream)
+	if mcpServer != nil {
+		http.Handle("/mcp", mcpServer)
+		log.Info("MCP Server 已启用: ws://localhost:%s/mcp", getEnv("PORT", "8080"))
+	}
 
 	port := getEnv("PORT", "8080")
 	log.Info("MiniGoAgent UI: http://localhost:%s", port)
@@ -436,13 +454,15 @@ func (s *chatServer) logAssistantResponse(sid, content string) {
 }
 
 func (s *chatServer) injectLogCtx(ctx context.Context, sid string) context.Context {
-	return context.WithValue(ctx, protocol.CtxLogf, func(f string, a ...any) {
+	ctx = context.WithValue(ctx, protocol.CtxLogf, func(f string, a ...any) {
 		msg := protocol.RedactString(fmt.Sprint(fmt.Sprintf(f, a...)))
 		log.Info("%s", msg)
 		if sl := sessionlog.Get(sid); sl != nil {
 			sl.LogRaw(msg, nil)
 		}
 	})
+	ctx = context.WithValue(ctx, protocol.CtxSessionID, sid)
+	return ctx
 }
 
 func (s *chatServer) getStatsMap() any {

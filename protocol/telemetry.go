@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -25,6 +26,8 @@ type Telemetry struct {
 	chunkBytes int64
 	toolCalls  int64
 	errors     int64
+	sessionID string
+	tracker   *UsageTracker
 }
 
 func NewTelemetry() *Telemetry {
@@ -48,19 +51,32 @@ func NewTelemetry() *Telemetry {
 	}
 }
 
+func (t *Telemetry) SetTracker(ut *UsageTracker) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.tracker = ut
+}
+
+func (t *Telemetry) SetSessionID(sid string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sessionID = sid
+}
+
 func (t *Telemetry) Record(model, vendor string, durSec float64, usage *Usage) (warn, compress bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	promptTks, completionTks := 0, 0
+	if usage != nil {
+		promptTks = usage.PromptTokens
+		completionTks = usage.CompletionTokens
+	}
 	t.last = CallRecord{
 		Model:            model,
 		Vendor:           vendor,
 		Duration:         durSec,
-		PromptTokens:     0,
-		CompletionTokens: 0,
-	}
-	if usage != nil {
-		t.last.PromptTokens = usage.PromptTokens
-		t.last.CompletionTokens = usage.CompletionTokens
+		PromptTokens:     promptTks,
+		CompletionTokens: completionTks,
 	}
 	t.lastWarn, t.lastCompr = false, false
 	if usage != nil && t.warnPct > 0 {
@@ -77,7 +93,17 @@ func (t *Telemetry) Record(model, vendor string, durSec float64, usage *Usage) (
 			}
 		}
 	}
+	if t.tracker != nil {
+		_ = t.tracker.Record(t.sessionID, model, vendor, durSec, promptTks, completionTks)
+	}
 	return
+}
+
+func (t *Telemetry) RecordFromContext(ctx context.Context, model, vendor string, durSec float64, usage *Usage) (warn, compress bool) {
+	if sid, ok := ctx.Value(CtxSessionID).(string); ok && sid != "" {
+		t.SetSessionID(sid)
+	}
+	return t.Record(model, vendor, durSec, usage)
 }
 
 func (t *Telemetry) SetThresholds(warnPct, compressPct int) {

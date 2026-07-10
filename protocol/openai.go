@@ -147,9 +147,25 @@ func NewOpenAI(cfg Config) *OpenAI {
 func (o *OpenAI) Chat(ctx context.Context, req Request) (*Response, error) {
 	start := time.Now()
 	if err := o.rateLimiter.Wait(ctx, estimateTokens(req)); err != nil {
+		RunOnErrorHooks(ctx, &req, err)
 		return nil, err
 	}
-	return o.chatWithFailover(ctx, req, start)
+	modifiedReq, err := RunBeforeProcessHooks(ctx, &req)
+	if err != nil {
+		RunOnErrorHooks(ctx, &req, err)
+		return nil, err
+	}
+	resp, err := o.chatWithFailover(ctx, *modifiedReq, start)
+	if err != nil {
+		RunOnErrorHooks(ctx, &req, err)
+		return nil, err
+	}
+	resp, err = RunAfterProcessHooks(ctx, &req, resp)
+	if err != nil {
+		RunOnErrorHooks(ctx, &req, err)
+		return nil, err
+	}
+	return resp, nil
 }
 
 func (o *OpenAI) chatWithFailover(ctx context.Context, req Request, start time.Time) (*Response, error) {
@@ -263,7 +279,7 @@ func (o *OpenAI) chatDirect(ctx context.Context, req Request, start time.Time) (
 	}
 	o.logf(ctx, "RAW chat direct done content=%dKB tool_calls=%d usage=%+v",
 		len(chatResp.Content)/1024, len(chatResp.ToolCalls), chatResp.Usage)
-	o.Telemetry.Record(o.model, o.vendor.String(), time.Since(start).Seconds(), chatResp.Usage)
+	o.Telemetry.RecordFromContext(ctx, o.model, o.vendor.String(), time.Since(start).Seconds(), chatResp.Usage)
 	return chatResp, nil
 }
 
@@ -283,8 +299,15 @@ func estimateTokens(req Request) int {
 }
 
 func (o *OpenAI) Stream(ctx context.Context, req Request) (<-chan Chunk, error) {
+	modifiedReq, err := RunBeforeProcessHooks(ctx, &req)
+	if err != nil {
+		RunOnErrorHooks(ctx, &req, err)
+		return nil, err
+	}
 	out := make(chan Chunk, 256)
-	go o.streamWithFailover(ctx, req, out)
+	go func() {
+		o.streamWithFailover(ctx, *modifiedReq, out)
+	}()
 	return out, nil
 }
 
@@ -293,9 +316,15 @@ func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<-
 	var lastErr error
 	start := time.Now()
 	if err := o.rateLimiter.Wait(ctx, estimateTokens(req)); err != nil {
+		RunOnErrorHooks(ctx, &req, err)
 		sendChunk(ctx, out, Chunk{Type: ChunkError, Error: err})
 		return
 	}
+	defer func() {
+		if lastErr != nil {
+			RunOnErrorHooks(ctx, &req, lastErr)
+		}
+	}()
 	maxReconnect := o.maxReconnect
 	failoverMax := 0
 	if o.failover.maxRetries() > 0 {
@@ -363,15 +392,15 @@ func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<-
 			}
 			continue
 		}
-		o.recordStreamCall(start, nil)
+		o.recordStreamCall(ctx, start, nil)
 		return
 	}
 	o.logf(ctx, "RAW all reconnect/failover attempts exhausted last_err=%v", lastErr)
 	sendChunk(ctx, out, Chunk{Type: ChunkError, Error: lastErr})
-	o.recordStreamCall(start, lastErr)
+	o.recordStreamCall(ctx, start, lastErr)
 }
 
-func (o *OpenAI) recordStreamCall(start time.Time, err error) {
+func (o *OpenAI) recordStreamCall(ctx context.Context, start time.Time, err error) {
 	o.usageMu.Lock()
 	usage := o.lastUsage
 	o.lastUsage = nil
@@ -379,7 +408,7 @@ func (o *OpenAI) recordStreamCall(start time.Time, err error) {
 	if err != nil {
 		return
 	}
-	o.Telemetry.Record(o.model, o.vendor.String(), time.Since(start).Seconds(), usage)
+	o.Telemetry.RecordFromContext(ctx, o.model, o.vendor.String(), time.Since(start).Seconds(), usage)
 }
 
 func (o *OpenAI) sendContextWarning(ctx context.Context, out chan<- Chunk, usage *Usage) {

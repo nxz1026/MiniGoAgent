@@ -389,3 +389,51 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 76. `protocol/openai.go`：`NewOpenAI` 初始化 `failover` config；`Chat` → `chatWithFailover`；`Stream` → `streamWithFailover`；`buildHTTPRequest`/`chatDirect`/`readStream` emit raw chunk 到 EventBus
 77. `main.go`：`main()` 启动时调用 `ValidateBaseURL` + `ValidateProxyEnv`；`injectLogCtx` 对日志做 `RedactString`；`OPENAI_FALLBACK_MODEL`/`OPENAI_FALLBACK_BASE_URL` 传入 Config；`RAW_LOG=1` 启用 RawLogProcessor
 78. `protocol/protocol_test.go`：新增 vendor 测试 + 修复 EventBus/HealthShortCircuit 时序
+
+### 第九轮（2026-07-10）：RAW 层增强 Phase 0 — UsageTracker + Telemetry 增强
+
+79. `protocol/usage_tracker.go` 新增：`UsageTracker` SQLite 持久化存储（`logs/raw/usage.db`），含 `UsageRecord`/`UsageQuery`/`UsageStats` 类型、`NewUsageTracker`/`Record`/`Query`/`GetStats`/`Close` 方法；使用 `modernc.org/sqlite` 纯 Go 驱动；WAL 模式提升并发性能
+80. `protocol/telemetry.go`：新增 `SetTracker(ut *UsageTracker)` / `SetSessionID(sid string)` 方法；`Record()` 在设置 tracker 后自动持久化到 SQLite
+81. `go.mod` / `go.sum`：新增 `modernc.org/sqlite v1.53.0` 依赖
+82. `logs/raw/`：创建目录 + `.gitkeep`
+83. `protocol/protocol_test.go`：新增 3 个测试（`TestUsageTracker_NewRecordQuery`、`TestTelemetry_SetTrackerRecords`、`TestUsageTracker_QueryPagination`），protocol 单测总数 41 个
+
+### 第十轮（2026-07-10）：Phase 1 — Plugin Command Interceptor
+
+84. `tools/interceptor.go` 新增：`Interceptor` 接口（`Name`/`Before`/`After`）+ `InterceptorRegistry` 全局注册表 + `RegisterInterceptor`/`ClearInterceptors`/`RunBeforeInterceptors`/`RunAfterInterceptors` 函数
+85. `tools/terminal.go`：`RunTerminal` 执行前后插入 `RunBeforeInterceptors` / `RunAfterInterceptors` 调用，命令和输出均可被插件链修改或拦截
+86. `tools/interceptor_test.go`：新增 4 个测试（`TestInterceptorRegistry_Block`、`TestInterceptorRegistry_Modify`、`TestInterceptorRegistry_Chain`、`TestInterceptorRegistry_Empty`）
+
+### 第十一轮（2026-07-10）：Phase 2 — Usage Analytics Integration
+
+87. `protocol/types.go`：新增 `CtxSessionID` context key
+88. `protocol/telemetry.go`：新增 `RecordFromContext(ctx, model, vendor, durSec, usage)` 方法，从 context 提取 sessionID 后调用 `Record`，实现全链路 sessionID 透传
+89. `protocol/openai.go`：`chatDirect` 和 `recordStreamCall` 的 `Telemetry.Record` 调用改为 `RecordFromContext`；`recordStreamCall` 签名增加 `ctx` 参数
+90. `main.go`：`injectLogCtx` 同时注入 `CtxSessionID`；新增 `USAGE_DB=1` env 控制 UsageTracker 初始化并挂载到 Telemetry
+
+### 第十二轮（2026-07-10）：Phase 3 — RAW Lifecycle Hooks
+
+91. `protocol/hooks.go` 新增：`LifecycleHook` 接口（`BeforeProcess`/`AfterProcess`/`OnError`）+ `LifecycleHookRegistry` 全局注册表 + `RegisterLifecycleHook`/`ClearLifecycleHooks`/`RunBeforeProcessHooks`/`RunAfterProcessHooks`/`RunOnErrorHooks` 函数 + `LifecycleHookFuncs` 链式构建器（`SetBefore`/`SetAfter`/`SetOnError`）
+92. `protocol/openai.go`：`Chat()` 和 `Stream()` 入口处调用 `RunBeforeProcessHooks`，返回后调用 `RunAfterProcessHooks`/`RunOnErrorHooks`；`streamWithFailover` 的 rate limit 错误和最终错误也触发 `RunOnErrorHooks`
+93. `protocol/hooks_test.go`：新增 4 个测试（`TestLifecycleHook_BlockBefore`、`TestLifecycleHook_BeforeAfter`、`TestLifecycleHook_OnError`、`TestLifecycleHook_Chain`），protocol 单测总数 45 个
+
+### 第十三轮（2026-07-10）：Phase 4 — Structured RAW Query API
+
+94. `protocol/raw_query.go` 新增：`DailyUsage`/`ModelUsage`/`VendorUsage` 聚合类型 + `UsageTracker.GetDailyStats(since, until)` / `GetModelStats()` / `GetVendorStats()` 方法，支持按日/模型/供应商聚合统计
+95. `protocol/protocol_test.go`：新增 `TestUsageTracker_DailyModelVendorStats`，验证聚合查询返回正确计数，protocol 单测总数 46 个
+
+### 第十四轮（2026-07-10）：Phase 5 — MCP Server
+
+96. `go.mod` / `go.sum`：新增 `github.com/gorilla/websocket v1.5.3` 依赖
+97. `protocol/mcp_server.go` 新增：`MCPServer` — 基于 gorilla/websocket 的 MCP 协议服务，接受 JSON-RPC 风格请求，支持 5 个方法（`get_stats`/`get_daily`/`get_models`/`get_vendors`/`query_records`）；`MCPRequest`/`MCPResponse`/`MCPError` 类型
+98. `protocol/usage_tracker.go`：`UsageQuery` 字段添加 `json:` tag，支持 JSON 序列化/反序列化
+99. `protocol/mcp_server_test.go`：新增 3 个测试（`TestMCPServer_GetStats`/`TestMCPServer_UnknownMethod`/`TestMCPServer_QueryRecords`），protocol 单测总数 49 个
+
+### 第十五轮（2026-07-10）：Phase 6 — main.go 集成 + 最终验证
+
+100. `main.go`：`USAGE_DB=1` 时创建 `UsageTracker` 并挂载到 `Telemetry`；若成功则创建 `MCPServer` 并注册到 `/mcp` WebSocket 端点（`ws://localhost:PORT/mcp`）
+101. 全项目 `go build`、`go vet`、`go test ./...` 通过：
+    - `MiniGoAgent` (main_test.go): ok
+    - `MiniGoAgent/protocol`: 49 个测试全部通过
+    - `MiniGoAgent/tools`: 10 个测试全部通过
+    - `MiniGoAgent/tools/filter/log/sessionlog`: 无测试文件

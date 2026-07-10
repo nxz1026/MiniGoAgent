@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -1281,6 +1282,168 @@ func TestMockStream_OllamaCloud(t *testing.T) {
 	}
 	if reasoning != "ollama-reason" {
 		t.Fatalf("expected reasoning 'ollama-reason', got %q", reasoning)
+	}
+}
+
+func TestUsageTracker_NewRecordQuery(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	ut, err := NewUsageTracker(dbPath)
+	if err != nil {
+		t.Fatalf("NewUsageTracker: %v", err)
+	}
+	defer ut.Close()
+
+	if err := ut.Record("sess-1", "gpt-4", "openai", 12.5, 1000, 200); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := ut.Record("sess-1", "gpt-4", "openai", 8.2, 500, 100); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := ut.Record("sess-2", "claude-3", "anthropic", 15.0, 2000, 500); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	records, err := ut.Query(UsageQuery{SessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("Query sess-1: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records for sess-1, got %d", len(records))
+	}
+
+	records, err = ut.Query(UsageQuery{Model: "claude-3"})
+	if err != nil {
+		t.Fatalf("Query model: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record for claude-3, got %d", len(records))
+	}
+
+	stats, err := ut.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.TotalCalls != 3 {
+		t.Fatalf("expected 3 total calls, got %d", stats.TotalCalls)
+	}
+	if stats.TotalTokens <= 0 {
+		t.Fatalf("expected positive total tokens, got %d", stats.TotalTokens)
+	}
+}
+
+func TestTelemetry_SetTrackerRecords(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "telemetry_usage.db")
+	ut, err := NewUsageTracker(dbPath)
+	if err != nil {
+		t.Fatalf("NewUsageTracker: %v", err)
+	}
+	defer ut.Close()
+
+	tel := NewTelemetry()
+	tel.SetTracker(ut)
+	tel.SetSessionID("test-session")
+
+	warn, comp := tel.Record("gpt-4", "openai", 5.0, &Usage{PromptTokens: 500, CompletionTokens: 100})
+	if warn {
+		t.Error("unexpected warn")
+	}
+	if comp {
+		t.Error("unexpected compress")
+	}
+
+	warn, comp = tel.Record("gpt-4", "openai", 10.0, &Usage{PromptTokens: 5000, CompletionTokens: 300})
+	if !warn {
+		t.Error("expected warn for 61% context")
+	}
+
+	stats, err := ut.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.TotalCalls != 2 {
+		t.Fatalf("expected 2 total calls via tracker, got %d", stats.TotalCalls)
+	}
+	if stats.TotalPrompt != 5500 {
+		t.Fatalf("expected 5500 total prompt tokens, got %d", stats.TotalPrompt)
+	}
+
+	records, err := ut.Query(UsageQuery{SessionID: "test-session"})
+	if err != nil {
+		t.Fatalf("Query session: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(records))
+	}
+}
+
+func TestUsageTracker_DailyModelVendorStats(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agg.db")
+	ut, err := NewUsageTracker(dbPath)
+	if err != nil {
+		t.Fatalf("NewUsageTracker: %v", err)
+	}
+	defer ut.Close()
+
+	ut.Record("s1", "gpt-4", "openai", 5.0, 1000, 200)
+	ut.Record("s1", "gpt-4", "openai", 3.0, 500, 100)
+	ut.Record("s2", "claude-3", "anthropic", 10.0, 2000, 500)
+
+	daily, err := ut.GetDailyStats("", "")
+	if err != nil {
+		t.Fatalf("GetDailyStats: %v", err)
+	}
+	if len(daily) == 0 {
+		t.Fatal("expected at least 1 daily stat")
+	}
+	if daily[0].CallCount != 3 {
+		t.Fatalf("expected 3 total calls in daily stats, got %d", daily[0].CallCount)
+	}
+
+	models, err := ut.GetModelStats()
+	if err != nil {
+		t.Fatalf("GetModelStats: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected 2 model stats, got %d", len(models))
+	}
+
+	vendors, err := ut.GetVendorStats()
+	if err != nil {
+		t.Fatalf("GetVendorStats: %v", err)
+	}
+	if len(vendors) != 2 {
+		t.Fatalf("expected 2 vendor stats, got %d", len(vendors))
+	}
+}
+
+func TestUsageTracker_QueryPagination(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pagination.db")
+	ut, err := NewUsageTracker(dbPath)
+	if err != nil {
+		t.Fatalf("NewUsageTracker: %v", err)
+	}
+	defer ut.Close()
+
+	for i := 0; i < 10; i++ {
+		ut.Record("batch", "model-x", "vendor-y", float64(i), i*100, i*10)
+	}
+
+	all, _ := ut.Query(UsageQuery{Limit: 100})
+	if len(all) != 10 {
+		t.Fatalf("expected 10 records, got %d", len(all))
+	}
+
+	first, _ := ut.Query(UsageQuery{Limit: 3, Offset: 0})
+	if len(first) != 3 {
+		t.Fatalf("expected 3 first-page records, got %d", len(first))
+	}
+
+	second, _ := ut.Query(UsageQuery{Limit: 3, Offset: 3})
+	if len(second) != 3 {
+		t.Fatalf("expected 3 second-page records, got %d", len(second))
+	}
+	if first[0].ID == second[0].ID {
+		t.Fatal("first and second page share same record")
 	}
 }
 

@@ -114,8 +114,9 @@ type Config struct {
 type contextKey string
 
 const (
-	CtxLogf      contextKey = "protocol_logf"
+	CtxLogf        contextKey = "protocol_logf"
 	CtxRetryNotify contextKey = "protocol_retry_notify"
+	CtxSessionID   contextKey = "protocol_session_id"
 )
 
 type Factory func(Config) (Protocol, error)

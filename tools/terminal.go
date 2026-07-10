@@ -22,27 +22,36 @@ func RunTerminal(ctx context.Context, input TerminalInput) (string, error) {
 		}
 	}
 
-	out, err := runCmd(ctx, "cmd", "/c", input.Command)
-	if err == nil {
-		filtered := filter.Run(out, input.Command)
-		if isCacheable(input.Command) {
-			storeCache(input.Command, filtered)
+	cmdCtx := CommandContext{Command: input.Command}
+	cmdCtx, err := RunBeforeInterceptors(ctx, cmdCtx)
+	if err != nil {
+		return "", fmt.Errorf("拦截器阻止: %w", err)
+	}
+
+	out, runErr := runCmd(ctx, "cmd", "/c", cmdCtx.Command)
+	result := CommandResult{Output: string(out), Err: runErr}
+	result = RunAfterInterceptors(ctx, cmdCtx, result)
+
+	if result.Err == nil {
+		filtered := filter.Run(result.Output, cmdCtx.Command)
+		if isCacheable(cmdCtx.Command) {
+			storeCache(cmdCtx.Command, filtered)
 		}
 		return filtered, nil
 	}
 
-	if isAccessDenied(err) {
+	if isAccessDenied(result.Err) {
 		if !isAdmin() {
 			return "", fmt.Errorf("命令需要管理员权限，请以管理员身份运行本程序后重试。当前无管理员权限。")
 		}
-		elevatedOut, elevErr := runElevated(ctx, input.Command)
+		elevatedOut, elevErr := runElevated(ctx, cmdCtx.Command)
 		if elevErr == nil {
-			return filter.Run(elevatedOut, input.Command), nil
+			return filter.Run(elevatedOut, cmdCtx.Command), nil
 		}
 		return fmt.Sprintf("提权执行失败: %v\n输出: %s", elevErr, elevatedOut), nil
 	}
 
-	return fmt.Sprintf("执行失败: %v\n输出: %s", err, string(out)), nil
+	return fmt.Sprintf("执行失败: %v\n输出: %s", result.Err, result.Output), nil
 }
 
 func runCmd(ctx context.Context, name string, args ...string) (string, error) {
