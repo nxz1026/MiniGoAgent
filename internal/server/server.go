@@ -21,9 +21,15 @@ import (
 	"MiniGoAgent/tools/sessionlog"
 )
 
+type ModelInfo interface {
+	Model() string
+	StatsLine() string
+	StatsJSON() string
+}
+
 type Server struct {
 	agent    AgentRunner
-	llm      *ChatModel
+	model    ModelInfo
 	sessions *session.Manager
 	frontend []byte
 	prompt   PromptProvider
@@ -43,8 +49,8 @@ type visionReq struct {
 	Prompt string `json:"prompt"`
 }
 
-func New(agent AgentRunner, llm *ChatModel, mgr *session.Manager, frontendHTML []byte, prompt PromptProvider) *Server {
-	return &Server{agent: agent, llm: llm, sessions: mgr, frontend: frontendHTML, prompt: prompt}
+func New(agent AgentRunner, modelInfo ModelInfo, mgr *session.Manager, frontendHTML []byte, prompt PromptProvider) *Server {
+	return &Server{agent: agent, model: modelInfo, sessions: mgr, frontend: frontendHTML, prompt: prompt}
 }
 
 func (s *Server) SaveHistory() {
@@ -134,7 +140,7 @@ func (s *Server) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		fullContent.WriteString(chunk.Content)
 	}
 
-	if statsJSON := s.llm.StatsJSON(); statsJSON != "" {
+	if statsJSON := s.model.StatsJSON(); statsJSON != "" {
 		fmt.Fprintf(w, "data: {\"stats\":%s}\n\n", statsJSON)
 		flusher.Flush()
 	}
@@ -243,7 +249,7 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 
 	ctx := s.injectLogCtx(r.Context(), sid)
 
-	if !supportsVision(s.llm.model) {
+	if !supportsVision(s.model.Model()) {
 		visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
@@ -311,7 +317,7 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 	resultMsg := &schema.Message{Role: schema.Assistant, Content: fullContent.String()}
 	s.sessions.Append(sid, userMsg, resultMsg)
 
-	if statsJSON := s.llm.StatsJSON(); statsJSON != "" {
+	if statsJSON := s.model.StatsJSON(); statsJSON != "" {
 		fmt.Fprintf(w, "data: %s\n\n", statsJSON)
 		flusher.Flush()
 	}
@@ -319,7 +325,7 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleVisionFromChat(w http.ResponseWriter, r *http.Request, sid, img, prompt string) {
 	ctx := s.injectLogCtx(r.Context(), sid)
-	if supportsVision(s.llm.model) {
+	if supportsVision(s.model.Model()) {
 		dataURL, err := imageToDataURL(ctx, img)
 		if err != nil {
 			json.NewEncoder(w).Encode(chatResp{Reply: "图片处理失败: " + err.Error()})
@@ -378,7 +384,7 @@ func (s *Server) logAssistantResponse(sid, content string) {
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		sl.WriteAssistantResponse("", snippet, content, s.llm.StatsLine())
+		sl.WriteAssistantResponse("", snippet, content, s.model.StatsLine())
 	}
 }
 
@@ -395,11 +401,15 @@ func (s *Server) injectLogCtx(ctx context.Context, sid string) context.Context {
 }
 
 func (s *Server) getStatsMap() any {
-	type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
-	if p, ok := s.llm.proto.(statsProvider); ok {
-		return p.GetTelemetry().FormatMap()
+	jsonStr := s.model.StatsJSON()
+	if jsonStr == "" {
+		return nil
 	}
-	return nil
+	var m map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 func (s *Server) sessionID(r *http.Request) string {

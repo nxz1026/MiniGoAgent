@@ -8,12 +8,14 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/components/tool/utils"
-	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
+	"MiniGoAgent/internal/adk"
+	"MiniGoAgent/internal/adk/convert"
+	"MiniGoAgent/internal/adk/event"
+	"MiniGoAgent/internal/adk/llm"
+	adktool "MiniGoAgent/internal/adk/tool"
+	adktypes "MiniGoAgent/internal/adk/types"
 	"MiniGoAgent/internal/config"
 	"MiniGoAgent/internal/server"
 	appsession "MiniGoAgent/internal/session"
@@ -34,15 +36,55 @@ func (p *promptProvider) SystemPrompt() string {
 }
 
 type agentAdapter struct {
-	agent *react.Agent
+	runner *adk.Runner
 }
 
 func (a *agentAdapter) Generate(ctx context.Context, msgs []*schema.Message) (*schema.Message, error) {
-	return a.agent.Generate(ctx, msgs)
+	adkMsgs := convert.FromEinoSlice(msgs)
+	resp, err := a.runner.Run(ctx, &adktypes.Request{Messages: adkMsgs})
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Messages) == 0 {
+		return &schema.Message{Role: schema.Assistant, Content: ""}, nil
+	}
+	return convert.ToEino(resp.Messages[0]), nil
 }
 
 func (a *agentAdapter) Stream(ctx context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
-	return a.agent.Stream(ctx, msgs)
+	adkMsgs := convert.FromEinoSlice(msgs)
+	events, err := a.runner.Stream(ctx, &adktypes.Request{Messages: adkMsgs})
+	if err != nil {
+		return nil, err
+	}
+
+	sr, sw := schema.Pipe[*schema.Message](64)
+	go func() {
+		defer sw.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case evt, ok := <-events:
+				if !ok {
+					return
+				}
+				switch evt.Type {
+				case adktypes.EventText:
+					if sw.Send(&schema.Message{Role: schema.Assistant, Content: evt.Content}, nil) {
+						return
+					}
+				case adktypes.EventReasoning:
+					if sw.Send(&schema.Message{Role: schema.Assistant, ReasoningContent: evt.Content}, nil) {
+						return
+					}
+				case adktypes.EventError:
+					return
+				}
+			}
+		}
+	}()
+	return sr, nil
 }
 
 func main() {
@@ -61,23 +103,12 @@ func main() {
 		log.Warn("Proxy 环境变量异常: %v", err)
 	}
 
-	proto, err := protocol.New("openai", protocol.Config{
-		APIKey:             apiKey,
-		APIKeys:            cfg.OpenAI.APIKeys,
-		BaseURL:            baseURL,
-		Model:              cfg.OpenAI.Model,
-		StreamTimeout:      cfg.OpenAI.StreamTimeout,
-		RateLimitRPM:       cfg.OpenAI.RateLimitRPM,
-		RateLimitTPM:       cfg.OpenAI.RateLimitTPM,
-		ContextWarnPct:     cfg.Agent.ContextWarnPct,
-		ContextCompressPct: cfg.Agent.ContextCompressPct,
-		MaxReconnect:       cfg.Agent.MaxReconnect,
-		FallbackModel:      cfg.OpenAI.FallbackModel,
-		FallbackBaseURL:    cfg.OpenAI.FallbackBaseURL,
-	})
+	br, err := llm.NewBridgeFromConfig(&cfg)
 	if err != nil {
-		log.Fatal("创建 Protocol 失败: %v", err)
+		log.Fatal("创建 LLM Bridge 失败: %v", err)
 	}
+	proto := br.Protocol()
+
 	if cfg.Raw.RawLog {
 		if p, ok := proto.(interface{ GetEventBus() *protocol.EventBus }); ok {
 			rawLog := protocol.NewRawLogProcessor(cfg.Raw.RawLogDir)
@@ -93,51 +124,47 @@ func main() {
 		if utErr != nil {
 			log.Warn("Usage 数据库初始化失败: %v", utErr)
 		} else {
-			type statsProvider interface{ GetTelemetry() *protocol.Telemetry }
-			if p, ok := proto.(statsProvider); ok {
+			type telProvider interface{ GetTelemetry() *protocol.Telemetry }
+			if p, ok := proto.(telProvider); ok {
 				p.GetTelemetry().SetTracker(usageTracker)
 				log.Info("Usage 追踪已启用: %s", cfg.Raw.UsageDBPath)
 			}
 			mcpServer = protocol.NewMCPServer(usageTracker)
 		}
 	}
-	llm := server.NewChatModel(proto, cfg.OpenAI.Model)
 
-	terminalTool, _ := utils.InferTool("terminal", "在 Windows 终端执行 shell 命令", tools.RunTerminal)
-	searchTool, _ := utils.InferTool("web_search", "在互联网上搜索信息", tools.WebSearch)
-	compressTool, _ := utils.InferTool("compress", "压缩长文本内容，保留关键信息", tools.RunCompress)
-	readFileTool, _ := utils.InferTool("read_file", "读取文件内容，可指定行范围", tools.ReadFile)
-	writeFileTool, _ := utils.InferTool("write_file", "创建或覆写文件", tools.WriteFile)
-	editFileTool, _ := utils.InferTool("edit_file", "在文件中查找替换文本", tools.EditFile)
-	globTool, _ := utils.InferTool("glob", "按 glob 模式搜索文件", tools.GlobFiles)
-	grepTool, _ := utils.InferTool("grep", "在文件中搜索文本", tools.GrepFiles)
-	visionTool, _ := utils.InferTool("vision", "分析图片内容，支持URL和base64 data URI", tools.RunVision)
+	reg := adktool.NewToolRegistry()
+	registerTool(reg, "terminal", "在 Windows 终端执行 shell 命令", tools.RunTerminal)
+	registerTool(reg, "web_search", "在互联网上搜索信息", tools.WebSearch)
+	registerTool(reg, "compress", "压缩长文本内容，保留关键信息", tools.RunCompress)
+	registerTool(reg, "read_file", "读取文件内容，可指定行范围", tools.ReadFile)
+	registerTool(reg, "write_file", "创建或覆写文件", tools.WriteFile)
+	registerTool(reg, "edit_file", "在文件中查找替换文本", tools.EditFile)
+	registerTool(reg, "glob", "按 glob 模式搜索文件", tools.GlobFiles)
+	registerTool(reg, "grep", "在文件中搜索文本", tools.GrepFiles)
+	registerTool(reg, "vision", "分析图片内容，支持URL和base64 data URI", tools.RunVision)
 
-	pp := &promptProvider{}
-	agent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel:   llm,
-		ToolsConfig:        compose.ToolsNodeConfig{Tools: []tool.BaseTool{terminalTool, searchTool, compressTool, readFileTool, writeFileTool, editFileTool, globTool, grepTool, visionTool}},
-		MaxStep:            cfg.Agent.MaxStep,
-		ToolReturnDirectly: map[string]struct{}{"compress": {}},
-		MessageRewriter: func(ctx context.Context, msgs []*schema.Message) []*schema.Message {
-			if len(msgs) <= 6 {
-				return msgs
-			}
-			return msgs[len(msgs)-6:]
-		},
-		MessageModifier: func(ctx context.Context, input []*schema.Message) []*schema.Message {
-			return append([]*schema.Message{schema.SystemMessage(pp.SystemPrompt())}, input...)
-		},
+	toolNames := []string{"terminal", "web_search", "compress", "read_file", "write_file", "edit_file", "glob", "grep", "vision"}
+
+	agent, err := adk.NewReactAgent(ctx, &adk.AgentConfig{
+		Bridge:    br,
+		Tools:     reg,
+		ToolNames: toolNames,
+		Prompt:    systemPrompt,
+		MaxSteps:  cfg.Agent.MaxStep,
 	})
 	if err != nil {
 		log.Fatal("创建 Agent 失败: %v", err)
 	}
 
+	bus := event.NewBus()
+	runner := adk.NewRunnerWithAgent(agent, nil, nil, nil, bus)
+
 	frontendData, err := frontendFS.ReadFile("frontend/index.html")
 	if err != nil {
 		log.Fatal("读取前端文件失败: %v", err)
 	}
-	srv := server.New(&agentAdapter{agent: agent}, llm, appsession.NewManager("default"), frontendData, pp)
+	srv := server.New(&agentAdapter{runner: runner}, br, appsession.NewManager("default"), frontendData, &promptProvider{})
 	srv.LoadHistory()
 	http.HandleFunc("/", srv.ServeFrontend)
 	http.HandleFunc("/api/chat", srv.HandleChat)
@@ -170,4 +197,12 @@ func main() {
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal("HTTP server error: %v", err)
 	}
+}
+
+func registerTool[T, D any](reg *adktool.ToolRegistry, name, desc string, fn func(ctx context.Context, input T) (D, error)) {
+	t, err := adktool.NewFromFn(name, desc, fn)
+	if err != nil {
+		log.Fatal("注册工具 %s 失败: %v", name, err)
+	}
+	reg.Register(name, t)
 }

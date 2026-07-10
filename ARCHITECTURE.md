@@ -284,18 +284,19 @@ First implementation should prefer offline Python scripts over a mandatory alway
 
 ---
 
-## 11. Next Refactor Guardrails
+## 11. ADK Integration Status
 
-Completed steps:
+Completed:
 
-- `internal/session` — session state, snapshot/append, JSON history persistence extracted from `main.go`.
-- `internal/server` — HTTP handlers, SSE streaming, ChatModel adapter, vision helpers extracted from `main.go`.
-- `AgentRunner` — `*react.Agent` replaced with interface in `Server`; adapter in `main.go`.
-- `PromptProvider` — wired into `main.go` and `Server` constructor; system prompt no longer hardcoded inline in `MessageModifier`.
+- `internal/adk/` — full ADK layer implemented (tool, llm, middleware, event, session, types, convert, agent, react, runner)
+- `internal/adk/convert/` — single source of truth for eino↔adk message conversion (`ToEino`/`FromEino`/`ToEinoSlice`/`FromEinoSlice`), replacing duplicated conversion logic across react/session/main
+- `main.go` — consumes `adk.Runner` (wraps `Agent` + middleware + event bus) via `agentAdapter` → `server.AgentRunner`
+- Middleware (4-hook onion chain) — `AroundModel` in `Runner.Run`, `AroundTool` in `ReactAgent` (wraps each eino tool `InvokableRun`)
+- EventBus — `Runner` publishes `AgentStart`/`AgentEnd`/`Error` lifecycle events; handlers run panic-isolated (each wrapped in `recover`)
+- Session `Store` — `Runner` auto-loads history and appends responses when `SessionID` is set
+- Guardrails — checked at two layers: (1) `Runner.Run`/`Runner.Stream` entry checks request tool calls; (2) `middlewareWrappedTool.InvokableRun` checks each tool call the agent produces at runtime (blocks denied tools before execution)
 
-Allowed next steps:
-
-- (Currently no high-priority guardrail items remain; next architecture work depends on feature needs.)
+**Stream 中间件限制**: `Runner.Stream` 只执行 middleware 的 `BeforeModel` 钩子（通过 `Chain.BeforeModelChain`）。`AfterModel` 需要完整的模型响应对象才能运作，而流式响应是消费时逐块产生的增量数据，无法在返回时提供，故不在流式路径执行。需要观测/改写完整响应的中间件应作用于非流式 `Run` 路径。`AgentEnd` 事件通过 `defer` 在流 goroutine 退出时兜底发布，保证与 `AgentStart` 配对（即使消费方提前断开或 ctx 取消）。
 
 Do not do yet:
 
@@ -304,3 +305,89 @@ Do not do yet:
 - Do not remove `reference/eino` replace.
 - Do not run DSPy optimization in the online request path.
 - Do not mix prompt optimization with RAW provider calling logic.
+
+
+---
+
+## 12. ADK Layer Target Architecture
+
+> Target: introduce `internal/adk/` as the agent runtime orchestration layer between `protocol/` (RAW) and `internal/server` (HTTP).
+
+### 12.1 Layer Position
+
+```text
+main.go
+    |  (thin wiring)
+    v
+internal/server (HTTP handlers, SSE)
+    |  (consumes adk.Agent interface)
+    v
+internal/adk/   ← NEW
+    |  (agent runtime orchestration)
+    +---> tool/     # ToolRegistry, Executor, Guardrails
+    +---> llm/      # ChatModel bridge, Model resolution
+    +---> session/  # Store interface
+    +---> prompt/   # PromptProvider interface
+    +---> middleware/  # 4-hook chain
+    +---> event/    # Agent lifecycle events
+    |
+    +---> eino react.Agent  (wrapped, not replaced)
+            |
+            +---> tools/
+            +---> chatModel  (via llm/bridge)
+                    |
+                    v
+                protocol.Protocol (RAW layer, unchanged)
+```
+
+### 12.2 Package Structure
+
+| Package | Contents | Status |
+|---|---|---|
+| `internal/adk/tool/` | Tool interface, ToolRegistry (check_fn TTL+grace), ToolExecutor (parallel+interrupt), Guardrails | Done |
+| `internal/adk/llm/` | Bridge (eino ToolCallingChatModel adapter wrapping protocol), ModelRef resolution | Done |
+| `internal/adk/session/` | Store interface (Get/Append/Snapshot) + ManagerAdapter wrapping `internal/session.Manager` | Done |
+| `internal/adk/middleware/` | Middleware interface + Chain (BeforeModel/AfterModel/BeforeTool/AfterTool, onion model) | Done, integrated into Runner |
+| `internal/adk/event/` | Event types + lightweight EventBus for agent lifecycle | Done, integrated into Runner |
+| `internal/adk/types/` | ADK-native Message/ToolCall/Request/Response/Event (zero eino dependency) | Done |
+| `internal/adk/agent.go` | Agent interface (Run/Stream) + AgentConfig | Done |
+| `internal/adk/react.go` | ReAct loop — wraps eino react.Agent as adk.Agent | Done |
+| `internal/adk/runner.go` | Runner — turn lifecycle with guardrails, middleware (AroundModel), event publishing, session store | Done |
+| `internal/adk/prompt/` | PromptProvider interface + Manager (version management reserved for DSPy) | Not started — `PromptProvider` defined in `runner.go` and `server/interfaces.go` |
+
+### 12.3 Key Design Decisions
+
+1. **ReAct loop**: wraps eino `react.Agent`, no custom rewrite. ADK provides the interface layer; eino remains the underlying engine.
+2. **ToolRegistry check_fn**: Hermes-style TTL cache (30s) + failure grace (60s). Transient failures within 60s of last success treated as flapping, return true.
+3. **Session store**: `internal/session.Manager` implements `adk/session.Store` interface. Zero rewrite, pure interface adaptation.
+4. **Middleware**: 4 hooks (BeforeModel/AfterModel/BeforeTool/AfterTool) with onion-shaped chain execution. `AroundModel` wired in Runner, `AroundTool` wired in ReactAgent via `middlewareWrappedTool` wrapping each eino tool's `InvokableRun`.
+5. **Guardrails**: Hermes-style `check_fn` availability probing + allow/deny lists for fine-grained control.
+6. **PromptProvider**: interface for stable prompt retrieval; Manager with version management reserved for future DSPy PromptLab.
+
+### 12.4 Migration Phases
+
+| Phase | Package | Contents | Status |
+|---|---|---|---|
+| A | `internal/adk/tool/` | Tool interface, Registry (check_fn TTL+grace), Executor, Guardrails | Done |
+| B | `internal/adk/llm/` | Bridge (chatModel from internal/server), Model resolution | Done |
+| C | `internal/adk/` | Agent interface + React (wraps eino) + Runner | Done |
+| D | `internal/adk/middleware/` + `event/` | Middleware interface+chain + EventBus | Done |
+| E | `internal/adk/session/` + `prompt/` | Store interface (Done), PromptProvider interface (defined in runner.go, NOT extracted to own package) | Mostly done |
+| F | `main.go` + `internal/server` | Switch main.go to ADK interfaces (Runner, Bridge, ToolRegistry); server keeps eino `schema.Message` on HTTP boundary | Done |
+| G | `internal/adk/runner.go` | Middleware AroundModel integrated into Runner.Run/Stream | Done |
+| H | `internal/adk/runner.go` | EventBus AgentStart/AgentEnd/Error lifecycle events | Done |
+| I | `internal/adk/runner.go` | Session Store auto-load/append in Runner | Done |
+| J | `main.go` | agentAdapter wraps `*adk.Runner` instead of raw `adk.Agent` | Done |
+| AroundTool | `internal/adk/react.go` | middlewareWrappedTool wraps each tool's InvokableRun with BeforeTool/AfterTool | Done |
+
+### 12.5 Boundaries (Do Not Cross)
+
+- ADK must NOT import `protocol/` types directly; use `llm/bridge` for conversion.
+- ADK must NOT import `tools/*` directly; use `tool/registry` for dispatch.
+- ADK must NOT own HTTP handlers (stay in `internal/server`).
+- ADK must NOT own session persistence (stay in `internal/session`).
+- ADK must NOT own RAW provider calling logic (stay in `protocol/`).
+- Do not delete or rename `protocol/`.
+- Do not move `tools/` to `internal/skill/`.
+- Do not remove `reference/eino` replace.
+- Do not run DSPy optimization in the online request path.

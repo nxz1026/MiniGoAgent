@@ -24,6 +24,7 @@ Minimal LLM Agent powered by Go + [eino](https://github.com/cloudwego/eino) — 
 - Raw HTTP logging: enable with RAW_LOG=1, writes to logs/raw/ (JSONL)
 - Usage analytics: enable with USAGE_DB=1, writes to logs/raw/usage.db
 - Local-only MCP WebSocket: enabled with USAGE_DB=1 at ws://localhost:PORT/mcp
+- Layered architecture: `internal/adk/` agent runtime (tool registry, middleware, events, session) between HTTP handlers and protocol layer
 
 ---
 
@@ -116,6 +117,7 @@ See [README.detail.md](README.detail.md) for architecture, protocol layer, proje
 - Raw HTTP 日志：RAW_LOG=1 启用，写入 logs/raw/（JSONL）
 - Usage 分析：USAGE_DB=1 启用，写入 logs/raw/usage.db
 - 本机限定 MCP WebSocket：USAGE_DB=1 后启用 ws://localhost:PORT/mcp
+- 分层架构：`internal/adk/` Agent 运行时（工具注册表、中间件、事件总线、会话持久化）隔离 HTTP handler 和协议层
 
 ---
 

@@ -506,3 +506,168 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 147. `internal/server/server.go`：`Server` 新增 `prompt PromptProvider` 字段，`New()` 增加 `prompt PromptProvider` 参数
 148. `ARCHITECTURE.md`：Sec 11 将 AgentRunner/PromptProvider 移至 "Completed steps"，Allowed next steps 清空
 149. 验证：`gofmt` 已执行；`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 通过（MiniGoAgent / internal/config / internal/server / internal/session / protocol / tools 全部 ok）；`go vet ./...` 通过
+
+### 第二十三轮（2026-07-10）：ADK 层实现
+
+150. `ARCHITECTURE.md`：新增 Sec 12 ADK 层目标架构描述（包结构、关键设计决策、迁移 Phases、边界规则）
+151. `MEMO.md`：追加第二十三轮设计摘要（引用 hermes-agent/opencode/eino 参考案例）
+152. **Phase A — `internal/adk/tool/`**：
+    - `tool.go`：`Tool` 结构体包装 eino `tool.InvokableTool`，支持 `WithCheck()`、`ToEinoTool()` 转换
+    - `registry.go`：`ToolRegistry` 含 `Register/Get/Names/GetDefinitions/GetEinoTools/Dispatch/Check` 方法
+    - check_fn TTL 缓存（30s） + 故障容错（60s grace），参照 Hermes `tools/registry.py`
+    - `executor.go`：`ToolExecutor` 支持并发/串行执行 + Context 取消/中断检查
+    - `guardrails.go`：`Guardrails` 支持 allow/deny 列表 + 自定义规则 + registry check_fn 集成
+    - 单测 45 个全部通过
+153. **Phase B — `internal/adk/llm/`**：
+    - `bridge.go`：`Bridge` 结构体实现 eino `model.ToolCallingChatModel`，将 `protocol.Protocol` 适配为 eino chat model
+    - `resolution.go`：`Resolve()`/`NewBridgeFromConfig()` 从 `config.Config` 创建协议层并返回 Bridge
+    - 包含 `Generate()`/`Stream()`/`WithTools()` + 流中断自动恢复（`[流中断，正在恢复...]`）
+154. **Phase C — `internal/adk/` 核心**：
+    - `types/` 子包：`Message`/`ToolCall`/`Request`/`Response`/`Event` 等 ADK 自有类型（零 eino 依赖）
+    - `agent.go`：`Agent` 接口（`Run`/`Stream`）+ `AgentConfig`
+    - `react.go`：`ReactAgent` 包装 eino `react.Agent` 为 ADK Agent，含 eino ↔ adk 消息转换
+    - `runner.go`：`Runner` 管理 turn 生命周期 + Guardrails 检查
+    - `session/store.go`：`Store` 接口（`Get`/`Append`/`Snapshot`）
+155. **Phase D — `internal/adk/middleware/` + `event/`**：
+    - `middleware/types.go`：`Middleware` 接口（`BeforeModel`/`AfterModel`/`BeforeTool`/`AfterTool`）
+    - `middleware/chain.go`：洋葱模型链式执行 `AroundModel`/`AroundTool`
+    - `middleware/chain_test.go`：8 个测试覆盖执行顺序/错误阻断/空链/修改响应
+    - `event/types.go`：`Type` 枚举（AgentStart/End/StepStart/End/ModelStart/End/ToolStart/End/Error）+ 事件数据
+    - `event/bus.go`：`Bus` 轻量 pub/sub
+156. **Phase E — session 适配**：
+    - `internal/adk/session/adapter.go`：`ManagerAdapter` 包装 `internal/session.Manager`，实现 `adk/session.Store`
+    - eino ↔ adk 消息类型转换函数（`toAdkMessages`/`toEinoMessages`）
+    - PromptProvider 接口保留在 `internal/adk/runner.go` 和 `internal/server/interfaces.go` 双定义状态
+157. 验证：`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（MiniGoAgent / internal/config / internal/server / internal/session / protocol / tools / internal/adk/... 全部 ok）；`go vet ./...` 通过
+
+### 第二十四轮（2026-07-10）：Phase F — main.go 切到 ADK 接口
+
+158. `main.go` 重构：消除 5 个直接 eino import（`react`/`compose`/`schema`/`tool`/`tool/utils`），改为 ADK 组件：
+    - `utils.InferTool` → `adktool.NewFromFn` 注册到 `adktool.ToolRegistry`
+    - `react.NewAgent` → `adk.NewReactAgent`
+    - `server.NewChatModel` → `llm.NewBridgeFromConfig`
+    - `agentAdapter` 从包装 `*react.Agent` 改为包装 `adk.Agent`，含 eino ↔ adk 类型转换
+    - raw log/usage tracker 通过 `br.Protocol()` 拿到协议层后挂载
+159. `internal/server/server.go`：
+    - `llm *ChatModel` 字段改为 `model ModelInfo` 接口（`Model()`/`StatsLine()`/`StatsJSON()`）
+    - `New()` 签名第二参数改为 `ModelInfo` 接口
+    - `getStatsMap()` 通过 `s.model.StatsJSON()` + Unmarshal 实现，不再直接取 `proto`
+    - 所有 `s.llm.*` 引用统一切到 `s.model.*`
+160. `internal/adk/llm/bridge.go`：新增 `Protocol() protocol.Protocol` 方法，暴露底层协议供 main.go 挂载 EventBus/Telemetry
+161. 验证：`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过；`go vet ./...` 通过
+
+### 第二十五轮（2026-07-10）：ADK 层补测试
+
+162. `internal/adk/event/bus_test.go` 新增：8 个测试覆盖 `NewBus`/`SubscribePublish`/`PublishDifferentType`/`Unsubscribe`/`PublishAll`/`PublishToUnsubscribedType`/`ConcurrentPublish`/`ConcurrentSubscribePublish`
+163. `internal/adk/types/types_test.go` 新增：6 个测试覆盖 `RoleConstants`/`MessageCreation`/`MessageWithToolCalls`/`ToolCallAssignment`/`RequestResponse`/`EventTypes`
+164. `internal/adk/session/adapter_test.go` 新增：8 个测试覆盖 `NewManagerAdapter`/`GetEmptySession`/`AppendAndSnapshot`/`AppendWithToolCalls`/`MultipleSessions`/`ToAdkMessagesEdgeCases`/`AdkToEinoRoundtrip`
+165. `internal/adk/llm/bridge_test.go` 新增：12 个测试覆盖 `NewBridge`/`Generate`/`GenerateEmptyResponse`/`GenerateWithToolCalls`/`GenerateWithOptions`/`Stream`/`StreamReasoning`/`StreamError`/`StreamInterruptedRecovery`/`WithTools`/`StatsLine`/`StatsJSON`
+166. `internal/adk/react_test.go` 新增：11 个测试覆盖 eino↔adk 消息转换 roundtrip、tool call 携带、edge cases、`NewReactAgent` error cases、`NewRunner` nil guard、`NewRunnerWithAgent`
+167. 修复了 `event/bus.go` 的 `Unsubscribe` 函数指针比较 bug（`&h == &handler` 因 loop variable 地址相同永不匹配，改为 `reflect.ValueOf(h).Pointer() == reflect.ValueOf(handler).Pointer()`）
+168. 修复了 `adk/runner.go` 缺少 `cfg == nil` 守卫导致的 `NewRunner(nil)` panic
+169. 验证：`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过；`go vet ./...` 通过
+
+### 第二十六轮（2026-07-10）：Phase G+H+I — Middleware/Events/Session 集成到 Runner
+
+170. **Phase G** — Middleware 集成：
+    - `RunnerConfig` 新增 `Middleware *middleware.Chain` 字段
+    - `Runner` 新增 `mw *middleware.Chain` 字段
+    - `Runner.Run` 用 `mw.AroundModel()` 包裹 `r.agent.Run()`，BeforeModel/AfterModel 钩子生效
+    - `Runner.Stream` 用 `mw.AroundModel()` 包裹 `r.agent.Stream()`
+    - Middleware 返回错误时发布 `Error` 事件
+    - `NewRunnerWithAgent` 签名新增 `mw *middleware.Chain` 参数
+171. **Phase H** — EventBus 集成：
+    - `RunnerConfig` 新增 `EventBus *event.Bus` 字段
+    - `Runner` 新增 `bus *event.Bus` 字段
+    - `Runner.Run` 在关键生命周期点发布事件：
+      - guardrails 阻断 → `event.Error`
+      - agent 开始执行 → `event.AgentStart`（含 SessionID/ToolNames）
+      - agent 返回错误 → `event.Error`
+      - agent 执行完成 → `event.AgentEnd`（含 Stats）
+    - `Runner.Stream` 流完成时发布 `event.AgentEnd`
+    - 新增 `publishEvent()` helper，bus 为 nil 时静默跳过
+172. **Phase I** — Session Store 持久化：
+    - `Runner.Run` 中 store 非空且 SessionID 非空时：
+      - 执行前从 `store.Get()` 加载历史消息，附加到 `req.Messages`
+      - 执行后将 `resp.Messages` 用 `store.Append()` 写入
+    - `Runner.Stream` 类似处理（从 store 加载历史，写入在流完成前）
+173. `internal/adk/runner_test.go` 新增：9 个集成测试
+    - `TestRunnerRunWithMiddleware` / `TestRunnerRunMiddlewareBlocks` — middleware 执行/阻断
+    - `TestRunnerRunWithStore` / `TestRunnerRunWithStoreAppendsToExisting` — session 持久化
+    - `TestRunnerRunWithEvents` — 事件发布
+    - `TestRunnerRunGuardrailsBlocked` — guardrails + 事件联动
+    - `TestRunnerRunErrorEvent` — 错误事件
+    - `TestRunnerStream` — 流式
+    - `TestRunnerAllIntegrations` — middleware+store+event 全部同时验证
+174. 验证：`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过；`go vet ./...` 通过
+
+### 第二十七轮（2026-07-10）：Phase J — main.go 改用 Runner + Phase L — ARCHITECTURE.md 同步
+
+175. **Phase J** — `main.go` 的 `agentAdapter` 从包装 `adk.Agent` 改为包装 `*adk.Runner`：
+    - 创建 `event.NewBus()` 并传入 `NewRunnerWithAgent`，Runner 的 event 发布开始生效
+    - `agentAdapter.Generate`/`Stream` 改为调用 `runner.Run`/`runner.Stream`
+    - runner 的 middleware/store/guards 字段传递 nil，保持 server 现有逻辑不变
+176. **Phase L** — `ARCHITECTURE.md` 同步更新：
+    - Sec 11 标题从 "Next Refactor Guardrails" 改为 "ADK Integration Status"，列出已完成的 ADK 集成项和剩余的 Do-not-do
+    - Sec 12.2 Package Structure 表更新实际状态（Done/Not started），移除已不存在的 `adk.go`，新增 `types/`
+    - Sec 12.4 Migration Phases 表更新 Phases A–J 及其完成状态
+177. 验证：`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过；`go vet ./...` 通过
+
+### 第二十八轮（2026-07-10）：middleware.AroundTool 接线
+
+178. `internal/adk/react.go`：
+    - 新增 `middlewareWrappedTool` 结构体，实现 eino `BaseTool` + 委托 `InvokableRun` 到 `chain.AroundTool`
+    - `AroundTool` 在 BeforeTool/AfterTool 之间调用原始工具的 `InvokableRun`
+    - 新增 `einoToolsWithMiddleware(reg, names, chain)`，为列表中的每个工具创建 `middlewareWrappedTool`
+    - `NewReactAgent` 根据 `cfg.Middleware != nil` 选择是否用 middleware-wrapped tools
+179. `internal/adk/agent.go`：`AgentConfig` 新增 `Middleware *middleware.Chain` 字段
+180. `internal/adk/runner.go`：`NewRunner` 将 `cfg.Middleware` 透传到 `AgentConfig.Middleware`
+181. `internal/adk/react_test.go`：新增 5 个测试覆盖 `middlewareWrappedTool`：
+    - `TestMiddlewareWrappedToolCallsHooks` — BeforeTool/AfterTool 被调用
+    - `TestMiddlewareWrappedToolBeforeBlocks` — BeforeTool 阻断执行
+    - `TestMiddlewareWrappedToolAfterModifiesResult` — AfterTool 修改结果
+    - `TestMiddlewareWrappedToolNonInvokable` — 非 InvokableTool 的 fallback
+    - `TestEinoToolsWithMiddleware` — `einoToolsWithMiddleware` 返回正确 wrapped tools
+182. 验证：`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（共 50+ ADK 子包测试全绿）；`go vet ./...` 通过
+
+### 第二十九轮（2026-07-10）：README 文档同步
+
+183. `README.md`：中英文功能列表各加一条 "Layered architecture: internal/adk/ agent runtime between HTTP handlers and protocol layer"
+184. `README.detail.md`：
+    - 项目结构图整体替换：移除已删除的 `main_test.go`，新增 `internal/` 完整展开（adk 8 子包、config、server、session），protocol/ 补齐新增文件（health/stream/usage/mcp/failover/hooks/interceptor/validator/redact）
+    - 架构图替换：从 `main.go → react.Agent → chatModel` 改为 `internal/server → internal/adk/ (Runner → Agent → ReactAgent) → Bridge → protocol`，补全 middleware/event/session 子层和 protocol 层的断路器/健康检查/EventBus/Failover/LifecycleHooks
+185. 验证：`go build ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过；`go vet ./...` 通过
+
+### 第二十九轮（补）：端到端集成测试 + 多轮稳定性验证
+
+186. `internal/server/adk_integration_test.go` 新增：11 个端到端集成测试，使用 `httptest.Server` + mock protocol + 全链路 ADK 组件（Bridge → ReactAgent → Runner → agentAdapter → Server → HTTP handler）：
+    - `TestIntegration_ChatEndpoint` — POST /api/chat 返回正确回复
+    - `TestIntegration_ChatEndpointError` — agent 返回错误时回复含 "错误" 前缀
+    - `TestIntegration_StreamEndpoint` — SSE 流式输出
+    - `TestIntegration_Frontend` — HTML 前端文件正常服务
+    - `TestIntegration_InvalidJSON` — 非法 JSON 返回 400
+    - `TestIntegration_MethodNotAllowed` — GET 请求返回 405
+    - `TestIntegration_RunnerEvents` — AgentStart/AgentEnd 事件正确发布
+    - `TestIntegration_ConcurrentRequests` — 10 并发请求全部成功
+    - `TestIntegration_SessionIsolation` — 多 session 互不干扰
+    - `TestIntegration_WithToolCall` — 工具调用链路完整执行
+187. 多轮稳定性验证：
+    - `go test ./internal/adk/... ./internal/server/... ./internal/session/... -count=1` 连续 5 轮，每轮 9 包全部 ok
+    - 全量 `go test ./... -count=1` + `go vet ./...` 一次通过
+    - 零 flaky 测试、零竞态风险（`CGO_ENABLED=0` 环境无法用 `-race`，但并发测试已覆盖）
+
+### 第三十轮：Code Review 问题修复（阻塞项 + 重要项）
+
+188. 依据资深 Code Review 报告，修复 3 阻塞项 + 5 重要项：
+    - B1 空指针防御：runner.go Run 在两分支汇合后加 if resp == nil 兜底，防止 Agent 实现返回 (nil,nil) 时 panic
+    - B2 Stream 中间件语义修正：Runner.Stream 移除副作用式 AroundModel，改为显式调用新增的 middleware.Chain.BeforeModelChain；AfterModel 不在流式路径执行；AgentEnd 改 defer 兜底发布，保证消费方提前断开/ctx 取消时仍与 AgentStart 配对
+    - B3 流式 goroutine 响应 ctx 取消：react.go、llm/bridge.go、main.go、runner.go 四处发送点加 select case ctx.Done；bridge/main 用 sw.Send() bool 检测下游关闭；react 加 defer sr.Close()。杜绝 goroutine 泄漏
+    - I3 Guardrails 下沉：AgentConfig 加 Guardrails 字段，透传至 middlewareWrappedTool，在 InvokableRun 执行前 Check，拦截 Agent 运行时动态产生的 tool call。入口检查保留作二次防御
+    - I2 非 Invokable 明确报错：middlewareWrappedTool.InvokableRun 对非 InvokableTool 返回 error，不再静默返回空
+    - I4 ToolExecutor 并发上限：executeConcurrent 引入信号量 channel，上限 max(4, NumCPU)
+    - I5 EventBus panic 隔离：Publish 拷贝 handler 快照 + 每 handler safeInvoke 包 recover，单 handler panic 不中断请求链路
+    - I1 转换逻辑收敛：新建 internal/adk/convert 包（ToEino/FromEino/ToEinoSlice/FromEinoSlice，含 nil 处理），替换 react/session/main 三处重复；bridge.go 是 eino->protocol 转换语义不同故保留
+189. 重命名 einoToolsWithMiddleware -> einoToolsWrapped；NewReactAgent 包装条件改为 Middleware != nil || Guardrails != nil
+190. 新增回归测试：TestRunnerRunNilResponse、TestRunnerStreamContextCancel、TestRunnerStreamPublishesAgentEnd、TestRunnerStreamBeforeModelRuns/Blocks、TestGuardrailBlocksRuntimeToolCall、TestGuardrailAllowsPermittedToolCall、convert 包往返测试、TestExecutor_ConcurrencyLimit、TestPublishHandlerPanicIsolation
+191. 验证：go build ./... 通过；go clean -testcache; go test ./... -count=1 全部通过；go vet ./... 通过；ADK+server 连续 3 轮全绿，无 flaky
+192. 文档：ARCHITECTURE.md 更新 convert 包、两层 guardrails、EventBus panic 隔离，新增「Stream 中间件限制」说明段

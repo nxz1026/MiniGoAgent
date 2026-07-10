@@ -321,7 +321,23 @@ go run .
 
 ```
 .
-├── main.go                  # HTTP 服务、Agent 组装、历史持久化
+├── main.go                  # 组装层：Config → Bridge → ToolRegistry → Agent/Runner → Server
+├── internal/
+│   ├── adk/                 # Agent Development Kit 层
+│   │   ├── agent.go         # Agent 接口 (Run/Stream) + AgentConfig
+│   │   ├── react.go         # ReactAgent 包装 eino react.Agent + eino↔adk 消息转换 + middleware.AroundTool
+│   │   ├── runner.go        # Runner: turn 生命周期 + Guardrails + Middleware/AroundModel + EventBus + Store
+│   │   ├── tool/            # Tool 接口 + ToolRegistry (check_fn TTL+grace) + ToolExecutor + Guardrails
+│   │   ├── llm/             # Bridge (eino ToolCallingChatModel 适配 protocol) + ModelRef 解析
+│   │   ├── middleware/      # 4-hook 中间件 (BeforeModel/AfterModel/BeforeTool/AfterTool) + 洋葱链
+│   │   ├── event/           # 事件类型枚举 + EventBus (pub/sub)
+│   │   ├── session/         # Store 接口 + ManagerAdapter 包装 internal/session.Manager
+│   │   └── types/           # ADK 自有类型 (Message/ToolCall/Request/Response/Event, 零 eino 依赖)
+│   ├── config/              # 配置读取 (.env → Config 聚合)
+│   ├── server/              # HTTP handlers + SSE + vision + session 管理
+│   │   ├── interfaces.go    # AgentRunner/PromptProvider 接口
+│   │   └── server.go        # Server 结构体 (New/HandleChat/HandleChatStream/HandleVision/...)
+│   └── session/             # 会话持久化 (Manager + Save/Load + DTO)
 ├── protocol/                # LLM 通信协议层（零 eino 依赖）
 │   ├── types.go             # Message/ToolCall/Chunk/Protocol 接口
 │   ├── openai.go            # OpenAI/DeepSeek/Zhipu 实现、SSE 解析
@@ -335,24 +351,35 @@ go run .
 │   ├── content_compress.go  # 按类型压缩策略
 │   ├── sse_framer.go        # SSE + Bedrock EventStream 帧解析（声明未接入）
 │   ├── ratelimit.go         # Token bucket 限流器（RPM/TPM）
-│   ├── protocol_test.go           # 单元 + Mock 测试（25 个）
+│   ├── health_check.go      # 定时健康检查 + CircuitBreaker 联动
+│   ├── health_manager.go    # 多 vendor 健康管理
+│   ├── content_predict.go   # 内容类型预测 + SHA256 缓存
+│   ├── stream.go            # EventBus pub/sub + ChunkProcessor
+│   ├── raw_log.go           # Raw HTTP 日志 (JSONL)
+│   ├── raw_query.go         # 聚合查询 API (GetDailyStats/GetModelStats/GetVendorStats)
+│   ├── usage_tracker.go     # SQLite 用量追踪
+│   ├── mcp_server.go        # 本机限定 MCP WebSocket
+│   ├── failover.go          # 模型级 failover 切换
+│   ├── hooks.go             # LifecycleHook (BeforeProcess/AfterProcess/OnError)
+│   ├── interceptor.go       # Plugin command interceptor
+│   ├── url_validator.go     # SSRF 防护
+│   ├── redact.go            # Secret 脱敏
+│   ├── protocol_test.go           # 单元 + Mock 测试（49 个）
 │   └── openai_integration_test.go # 集成测试（9 个）
-├── main_test.go             # 辅助函数 + 历史 DTO 测试（7 个）
 ├── tools/                   # 工具实现
 │   ├── terminal.go          # Shell 命令执行
 │   ├── websearch.go         # 联网搜索
 │   ├── compress.go          # 文本压缩
 │   ├── fileops.go           # 读写编辑文件/Glob/Grep
-│   ├── fileops_test.go      # 文件操作测试（3 个）
 │   ├── vision.go            # 图片分析
 │   ├── cache.go             # 终端命令缓存
-│   ├── cache_test.go        # 缓存逻辑测试（1 个）
+│   ├── interceptor.go       # Plugin command interceptor
 │   ├── filter/              # 输出过滤器
 │   ├── log/                 # 日志包
 │   └── sessionlog/          # 每会话 .md 日志
 ├── frontend/
 │   └── index.html           # Web 界面
-└── reference/               # 参考代码
+└── reference/               # 参考代码 (eino/hermes-agent/opencode)
 ```
 
 ---
@@ -375,26 +402,39 @@ go test -tags=integration -run "TestOpenAIChat" ./protocol/ -v
 浏览器 (SSE)
     │
     ▼
-HTTP 服务 (main.go)
-    │
+HTTP 服务 (internal/server)
+    │  (通过 AgentRunner 接口)
     ▼
-react.Agent (eino)
+internal/adk/
+    ├── Runner (turn 生命周期 + Guardrails + Middleware + EventBus + Store)
+    │   │
+    │   └── Agent (Run/Stream)
+    │       │
+    │       └── ReactAgent (包装 eino react.Agent)
+    │           │
+    │           ├── ToolRegistry → tools/* (ADK tool 包装 → eino InvokableTool)
+    │           │   ├── 终端 (过滤 + 缓存)
+    │           │   ├── 联网搜索
+    │           │   ├── 文件操作
+    │           │   ├── 文本压缩
+    │           │   └── 图片分析
+    │           │
+    │           └── Bridge (eino ToolCallingChatModel)
+    │                   │
+    │                   ▼
+    │               protocol.Protocol
+    │                   │
+    │                   └── protocol.OpenAI
+    │                       ├── HTTP 重试
+    │                       ├── SSE 读取
+    │                       ├── EventBus → telemetry/log/raw
+    │                       ├── 断路器
+    │                       ├── 健康检查
+    │                       ├── 限流器
+    │                       ├── Failover
+    │                       └── LifecycleHooks
     │
-    ├── 工具执行
-    │   ├── 终端 (过滤 + 缓存)
-    │   ├── 联网搜索
-    │   ├── 文件操作
-    │   ├── 文本压缩
-    │   └── 图片分析
-    │
-    └── chatModel (适配层)
-            │
-            ▼
-        protocol.Protocol
-            │
-            └── protocol.OpenAI
-                ├── HTTP 重试
-                ├── SSE 读取
-                ├── 工具调用累积
-                └── Think 标签解析
+    ├── middleware/  (4-hook 洋葱链: AroundModel/AroundTool)
+    ├── event/       (AgentStart/AgentEnd/Error 事件发布)
+    └── session/     (Store 接口 + ManagerAdapter)
 ```
