@@ -387,6 +387,9 @@ func (o *OpenAI) streamWithFailover(ctx context.Context, req Request, out chan<-
 		if _, hookErr := RunAfterProcessHooks(ctx, &req, &Response{Usage: usage}); hookErr != nil {
 			RunOnErrorHooks(ctx, &req, hookErr)
 		}
+		if val, ok := vendorCircuitBreaker.Load(o.vendor); ok {
+			val.(*CircuitBreaker).Success()
+		}
 		return
 	}
 	o.logf(ctx, "RAW all reconnect/failover attempts exhausted last_err=%v", lastErr)

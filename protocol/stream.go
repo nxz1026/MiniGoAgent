@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 )
@@ -112,7 +113,14 @@ func (eb *EventBus) run() {
 func (eb *EventBus) dispatch(name string, p ChunkProcessor, ch <-chan Chunk) {
 	defer eb.wg.Done()
 	for chunk := range ch {
-		_ = p.Process(context.Background(), chunk)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("event bus dispatch %s panic: %v", name, r)
+				}
+			}()
+			_ = p.Process(context.Background(), chunk)
+		}()
 	}
 }
 

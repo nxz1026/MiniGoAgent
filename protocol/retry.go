@@ -121,9 +121,12 @@ func SendWithRetry(ctx context.Context, client *http.Client, vendor Vendor,
 			lastErr = fmt.Errorf("request failed: %w", err)
 			continue
 		}
-		if resp.StatusCode == http.StatusOK {
-			return resp, nil
+	if resp.StatusCode == http.StatusOK {
+		if val, ok := vendorCircuitBreaker.Load(vendor); ok {
+			val.(*CircuitBreaker).Success()
 		}
+		return resp, nil
+	}
 
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		retryAfter = parseRetryAfter(resp)
