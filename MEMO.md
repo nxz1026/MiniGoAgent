@@ -803,3 +803,25 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
     - `convert.FromEino` 新增 `fromEinoMultiContent` 辅助函数，将 `UserInputMultiContent` 转为 `[]map[string]any`
     - `internal/server/adk_integration_test.go` 删除重复的 `einoToAdk`/`adkToEino` 函数，改用 `convert.FromEinoSlice`/`convert.ToEino`
 223. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（16 包全绿）
+
+### 第三十六轮（2026-07-11）：Code Review 修复 — EventBus.Stop panic / HealthChecker 死代码 / Session MultiContent / readStream emitted stale
+
+224. **`protocol/openai.go`**：修复 P3-1 拆分引入的 `emitted` stale 变量 bug — `processSSEData` 提前返回（error 或 finish）时本地 `emitted` 未同步 `state.emitted`，改为全用 `state.emitted`
+225. **`internal/session/manager.go`**：`historyMessage` 新增 `MultiContent []map[string]any` 字段；`toHistoryMsg`/`fromHistoryMsg` 通过 `fromEinoMultiContent`/`toEinoMultiContent` 辅助函数 round-trip 多模态内容；会话持久化不再静默丢弃图片消息
+226. **`protocol/stream.go`**：修复 `EventBus.Stop()` panic — `run()` goroutine 向已关闭 subscriber channel 发送时 panic；新增 `runDone chan struct{}`，`run()` 结束时 `close(runDone)`；`Stop()` 改为：`close(publisher)` → `<-runDone` → `close(subs)` → `wg.Wait()`，确保发送者先退出再关闭订阅者
+227. **`protocol/health_check.go`**：删除 `onStatusChange`/`logf` 死代码（`logf()` 恒返回 nil，状态变更从未被记录）；`recordSuccess`/`recordFailure` 中移除 `onStatusChange` 调用
+228. **`protocol/health_manager.go`** + **`main.go`**：新增 `StopHealthManager()` 导出函数；`main.go` 优雅关闭时调用 `protocol.StopHealthManager()`，停止 health checker goroutine
+229. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go test ./... -count=1` 全部通过
+
+### 第三十七轮（2026-07-11）：Code Review 修复 — EditFile 路径校验绕过 + PowerShell 注入
+
+230. **`tools/fileops.go`**：`EditFile` 函数 `os.WriteFile` 使用 `input.Path` 而非验证后的 `path` 变量，绕过 `ValidatePath` workspace root 检查；改为使用 `path`
+231. **`tools/terminal.go`**：`runElevated` PowerShell 命令构造时仅转义双引号 `"` → `\"`，未转义单引号 `'`，攻击者可构造含单引号的命令注入任意 PowerShell 代码；改为 `strings.ReplaceAll(command, "'", "''")`
+232. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go test ./... -count=1` 全部通过
+
+### 第三十八轮（2026-07-11）：Code Review 修复 — CircuitBreaker HalfOpen 不归位 + EventBus.dispatch panic 死锁
+
+233. **`protocol/retry.go`**：`SendWithRetry` HTTP 200 后调用 `vendorCircuitBreaker.Success()`，允许 HalfOpen 态的 breaker 在成功请求后回到 Closed
+234. **`protocol/openai.go`**：`streamWithFailover` 成功完成 `readStream` + `AfterProcessHooks` 后调用 `vendorCircuitBreaker.Success()`，流式成功同样复位 breaker
+235. **`protocol/stream.go`**：`dispatch` goroutine 内 `p.Process()` 加 `recover` + `log.Printf("event bus dispatch %s panic: %v", name, r)`，processor panic 不再导致 `wg.Wait()` 死锁；新增 `"log"` 导入
+236. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go test ./... -count=1` 全部通过（16 包全绿，protocol 测试 100s 完成）

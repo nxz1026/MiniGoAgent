@@ -288,7 +288,7 @@ First implementation should prefer offline Python scripts over a mandatory alway
 - `reference/eino` is a local replace dependency and currently appears as an abnormal/untracked git status item in this workspace.
 - README and MEMO are append-heavy and can contain old counts in earlier sections; latest sections are authoritative.
 - Some integration behavior depends on external provider compatibility and is not covered by network-free tests.
-### Resolved in 2026-07-11 (Round 32+33+34)
+### Resolved in 2026-07-11 (Round 32+33+34+36+37+38)
 
 These were listed as debt in earlier versions and are now fixed:
 
@@ -303,7 +303,7 @@ These were listed as debt in earlier versions and are now fixed:
 - 10 JSON marshal / response read errors silently discarded → proper error handling across 5 files
 - `isPrivateIP` missed `0.0.0.0` (unspecified) → added `IsLoopback()`/`IsUnspecified()` check
 - `sse_framer.go` (271 lines of dead code, `//go:build never`) → deleted
-- Session storage no background eviction → `Manager.StartCleanup(ctx, interval, maxAge)` background goroutine (`internal/session/manager.go:73`)
+- Session storage no background eviction → `Manager.StartCleanup(ctx, interval, maxAge)` background goroutine (`internal/session/manager.go:74`)
 - Vendor policy switch duplication across `openai.go`/`health_manager.go` → centralized in `protocol/vendor_policy.go`
 - Vendor policy functions untested → `protocol/vendor_policy_test.go` (8 tests)
 - `EventBus.Publish` backpressure blocked stream emit → `TryPublish` non-blocking send (`protocol/openai.go`)
@@ -311,6 +311,11 @@ These were listed as debt in earlier versions and are now fixed:
 - `tool/registry.go` `Check()` TOCTOU race (`r.Get` outside lock) → `t.Check(ctx)` inside `r.mu.RLock()` (`internal/adk/tool/registry.go`)
 - `compressCache` manual map+mutex+stale eviction (500 cap, batch-50 evict, no LRU) → `golang-lru/v2/expirable.NewLRU` with automatic LRU eviction and 30s TTL (`protocol/content_compress.go`)
 - `CircuitBreaker` global `failureRate` field unused, `Success()` not resetting in Closed state, no constructor → `NewCircuitBreaker` with `FailureThreshold`, `Success()` resets counter in Closed, removed `failureRate` (`protocol/types.go`)
+- `EventBus.Stop()` send-on-closed-channel panic → `runDone` channel synchronization: close publisher → wait runDone → close subs → wg.Wait (`protocol/stream.go`)
+- `HealthChecker.onStatusChange`/`logf` dead code (logf always returned nil) → removed (`protocol/health_check.go`)
+- `HealthManager.Stop()` not wired into graceful shutdown → `StopHealthManager()` called from `main.go` signal handler (`protocol/health_manager.go`, `main.go`)
+- `CircuitBreaker.Success()` not called on stream success → `streamWithFailover` and `SendWithRetry` both call `Success()` after successful HTTP 200, allowing HalfOpen → Closed transition (`protocol/openai.go`, `protocol/retry.go`)
+- `EventBus.dispatch` processor panic → `recover` + `log.Printf` prevents `wg.Wait()` deadlock in `Stop()` (`protocol/stream.go`)
 
 ---
 
