@@ -96,6 +96,7 @@ func (eb *EventBus) run() {
 			select {
 			case ch <- chunk:
 			default:
+				// 非阻塞: 订阅者队列满时跳过，不阻塞生产者
 			}
 		}
 		eb.mu.RUnlock()

@@ -167,7 +167,9 @@ func main() {
 	if err != nil {
 		log.Fatal("读取前端文件失败: %v", err)
 	}
-	srv := server.New(&agentAdapter{runner: runner}, br, appsession.NewManager("default"), frontendData, &promptProvider{})
+	sessionMgr := appsession.NewManager("default")
+	sessionMgr.StartCleanup(ctx, 5*time.Minute, 30*time.Minute)
+	srv := server.New(&agentAdapter{runner: runner}, br, sessionMgr, frontendData, &promptProvider{})
 	srv.LoadHistory()
 	http.HandleFunc("/", srv.ServeFrontend)
 	http.HandleFunc("/api/chat", srv.HandleChat)

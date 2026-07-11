@@ -154,6 +154,7 @@ These are already implemented and must be preserved during future refactors.
 - Interface: `protocol.Protocol` with `Chat(ctx, req)` and `Stream(ctx, req)`.
 - Supports: OpenAI-compatible chat completions, streaming SSE, tool calls, reasoning content, usage parsing, multimodal message content, model/vendor policy fields.
 - Providers covered by detection/policy: OpenAI-compatible default, DeepSeek, Zhipu, MiniMax, LongCat, MiMo, Ollama Cloud, StepFun, Qwen.
+- Vendor policy centralized in `protocol/vendor_policy.go`: `buildThinkingFields`, `resolveReasoningPolicy`, `defaultHealthEndpoint`. Extracted from repeated switch blocks in `openai.go`.
 
 ### 5.4 Reliability and Safety Optimizations
 
@@ -290,9 +291,7 @@ First implementation should prefer offline Python scripts over a mandatory alway
 - `EventBus.Publish` drops events when subscriber channels are full; telemetry/log gaps may occur under high load.
 - `internal/adk/tool/registry.go` `Check()` TOCTOU race mitigated by holding `r.mu.RLock()` during `t.Check(ctx)`, but still subject to cache stampede under extreme concurrency.
 - `compressCache` eviction deletes 50 entries at a time when over capacity — acceptable for current scale but lacks LRU/TTL for production workloads.
-- Session in-memory storage has TTL-based `Cleanup(maxAge)` but no automatic background eviction goroutine yet — callers must periodically invoke or sessions accumulate until restart.
-
-### Resolved in 2026-07-11 (Round 32)
+### Resolved in 2026-07-11 (Round 32+33)
 
 These were listed as debt in earlier versions and are now fixed:
 
@@ -307,6 +306,9 @@ These were listed as debt in earlier versions and are now fixed:
 - 10 JSON marshal / response read errors silently discarded → proper error handling across 5 files
 - `isPrivateIP` missed `0.0.0.0` (unspecified) → added `IsLoopback()`/`IsUnspecified()` check
 - `sse_framer.go` (271 lines of dead code, `//go:build never`) → deleted
+- Session storage no background eviction → `Manager.StartCleanup(ctx, interval, maxAge)` background goroutine (`internal/session/manager.go:73`)
+- Vendor policy switch duplication across `openai.go`/`health_manager.go` → centralized in `protocol/vendor_policy.go`
+- Vendor policy functions untested → `protocol/vendor_policy_test.go` (8 tests)
 
 ---
 

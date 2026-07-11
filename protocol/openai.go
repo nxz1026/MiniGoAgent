@@ -122,14 +122,7 @@ func NewOpenAI(cfg Config) (*OpenAI, error) {
 		}
 	}
 	o.Telemetry.SetThresholds(cfg.ContextWarnPct, cfg.ContextCompressPct)
-	switch o.vendor {
-	case VendorDeepSeek:
-		o.policy = reasoningThinking
-	case VendorZhipu, VendorMiniMax, VendorLongCat, VendorMiMo, VendorStepFun, VendorQwen:
-		o.policy = reasoningThinking
-	default:
-		o.policy = reasoningEffort
-	}
+	o.policy = resolveReasoningPolicy(o.vendor)
 	o.eventBus.Subscribe("telemetry", &telemetryProcessor{telemetry: o.Telemetry})
 	o.eventBus.Subscribe("log", &logProcessor{logf: o.logf})
 
@@ -199,14 +192,7 @@ func (o *OpenAI) applyFailover(model, baseURL string) {
 	o.baseURL = strings.TrimRight(baseURL, "/") + "/chat/completions"
 	o.model = model
 	o.vendor = DetectVendor(baseURL)
-	switch o.vendor {
-	case VendorDeepSeek:
-		o.policy = reasoningThinking
-	case VendorZhipu, VendorMiniMax, VendorLongCat, VendorMiMo, VendorStepFun, VendorQwen:
-		o.policy = reasoningThinking
-	default:
-		o.policy = reasoningEffort
-	}
+	o.policy = resolveReasoningPolicy(o.vendor)
 }
 
 func (o *OpenAI) chatDirect(ctx context.Context, req Request, start time.Time) (*Response, error) {
@@ -657,40 +643,7 @@ func (o *OpenAI) streamErr(emitted bool, err error) error {
 }
 
 func (o *OpenAI) buildThinkingFields(m map[string]any) {
-	switch o.policy {
-	case reasoningThinking:
-		var t string
-		switch o.vendor {
-		case VendorDeepSeek:
-			if o.thinkingType == "disabled" {
-				m["thinking"] = map[string]string{"type": "disabled"}
-				return
-			}
-			m["thinking"] = map[string]string{"type": "enabled"}
-		case VendorMiniMax:
-			t = o.effort
-			if t == "" {
-				t = "adaptive"
-			}
-			m["thinking"] = map[string]string{"type": t}
-		case VendorZhipu:
-			t = o.effort
-			if t == "" {
-				t = "enabled"
-			}
-			m["thinking"] = map[string]string{"type": t}
-		case VendorLongCat, VendorMiMo, VendorStepFun, VendorQwen:
-			t = o.thinkingType
-			if t == "" {
-				t = "enabled"
-			}
-			m["thinking"] = map[string]string{"type": t}
-		}
-	case reasoningEffort:
-		if o.effort != "" {
-			m["reasoning_effort"] = o.effort
-		}
-	}
+	buildThinkingFields(m, o.vendor, o.policy, o.effort, o.thinkingType)
 }
 
 // readStream uses bufio.Scanner (not SseFramer) because MiniGoAgent is an

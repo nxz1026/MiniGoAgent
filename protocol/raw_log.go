@@ -30,22 +30,38 @@ func (p *RawLogProcessor) Process(ctx context.Context, chunk Chunk) error {
 	}
 	switch chunk.Type {
 	case ChunkRawRequest, ChunkRawResponse, ChunkRawError:
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.file == nil || p.date != time.Now().Format("2006-01-02") {
-			p.rotate()
-		}
-		line, _ := json.Marshal(map[string]any{
-			"ts":   time.Now().Format(time.RFC3339),
-			"kind": chunk.Type.String(),
-			"data": chunk.Text,
-		})
-		if _, err := p.file.Write(append(line, '\n')); err != nil {
-			p.enabled = false
-			return err
+		if !p.tryWrite(chunk) {
+			if logf, ok := ctx.Value(CtxLogf).(func(string, ...any)); ok && logf != nil {
+				logf("raw log dropped: %s", chunk.Type.String())
+			}
 		}
 	}
 	return nil
+}
+
+func (p *RawLogProcessor) tryWrite(chunk Chunk) bool {
+	if !p.mu.TryLock() {
+		return false
+	}
+	defer p.mu.Unlock()
+
+	if p.file == nil || p.date != time.Now().Format("2006-01-02") {
+		p.rotate()
+	}
+	if p.file == nil {
+		return false
+	}
+
+	line, _ := json.Marshal(map[string]any{
+		"ts":   time.Now().Format(time.RFC3339),
+		"kind": chunk.Type.String(),
+		"data": chunk.Text,
+	})
+	if _, err := p.file.Write(append(line, '\n')); err != nil {
+		p.enabled = false
+		return false
+	}
+	return true
 }
 
 func (p *RawLogProcessor) Name() string {

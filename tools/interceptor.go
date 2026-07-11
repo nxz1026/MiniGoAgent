@@ -45,7 +45,8 @@ func ClearInterceptors() {
 
 func RunBeforeInterceptors(ctx context.Context, cmd CommandContext) (CommandContext, error) {
 	globalRegistry.mu.RLock()
-	items := append([]Interceptor(nil), globalRegistry.items...)
+	items := make([]Interceptor, len(globalRegistry.items))
+	copy(items, globalRegistry.items)
 	globalRegistry.mu.RUnlock()
 	var err error
 	for _, i := range items {
@@ -59,7 +60,8 @@ func RunBeforeInterceptors(ctx context.Context, cmd CommandContext) (CommandCont
 
 func RunAfterInterceptors(ctx context.Context, cmd CommandContext, result CommandResult) CommandResult {
 	globalRegistry.mu.RLock()
-	items := append([]Interceptor(nil), globalRegistry.items...)
+	items := make([]Interceptor, len(globalRegistry.items))
+	copy(items, globalRegistry.items)
 	globalRegistry.mu.RUnlock()
 	var err error
 	for _, i := range items {

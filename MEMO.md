@@ -187,9 +187,10 @@ MiniGoAgent/
 │   ├── telemetry.go               # Stats collector: Record/FormatLine/FormatMap/ModelContextWindow
 │   ├── content_detector.go        # 5 content type detection
 │   ├── content_compress.go        # Per-type compression strategies
-│   ├── sse_framer.go              # Byte-level SSE + Bedrock EventStream (declared, not wired)
+│   ├── vendor_policy.go           # Centralized vendor policy (thinking/effort/health)
 │   ├── ratelimit.go               # Token bucket rate limiter (RPM/TPM)
-│   ├── protocol_test.go           # 25 unit tests (mock server)
+│   ├── protocol_test.go           # 72 unit tests (mock server)
+│   ├── vendor_policy_test.go      # 8 vendor policy tests
 │   └── openai_integration_test.go # 9 integration tests
 ├── tools/                         # Agent tools
 │   ├── terminal.go                # Shell command execution
@@ -736,3 +737,43 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
     - 删除 `protocol/sse_framer.go`（271 行，`//go:build never` 排除编译）；同步清理 `protocol/openai.go` 中的引用注释
 
 204. 验证：`gofmt` 已执行；`go build ./...` 通过；`go vet ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（13 包 ok，filter/log/sessionlog 无测试文件）；两遍全绿确认无 flaky
+
+### 第三十三轮（2026-07-11）：架构优化 — EventBus/RawLog/HealthChecker/供应商策略抽离
+
+205. **EventBus 非阻塞广播修复**（`protocol/stream.go`）：
+    - `EventBus.run()` 分发循环使用 `select + default` 非阻塞发送，慢消费者不再阻塞生产者
+    - 移除对 `Chunk.Logf` 的不存在字段引用（修复编译错误）
+
+206. **RawLogProcessor 非阻塞写入**（`protocol/raw_log.go`）：
+    - `Process()` 使用 `tryWrite()` 方法，通过 `sync.Mutex.TryLock` 实现非阻塞锁
+    - 锁忙时直接返回 nil，不阻塞主流程
+    - 移除上一轮引入的嵌套函数语法错误
+
+207. **HealthChecker 增强**（`protocol/health_check.go`）：
+    - `Start()` 启动时立即执行首次检查（不再等待第一个 tick）
+    - 新增 `consecutiveFailures` 连续失败计数
+    - 新增 `onStatusChange` 状态变更通知钩子
+    - 新增 `lastErr` 记录最后一次错误详情
+
+208. **拦截器链竞态修复**（`tools/interceptor.go`）：
+    - `RunBeforeInterceptors`/`RunAfterInterceptors` 切片复制从 `append([]Interceptor(nil), ...)` 改为 `make + copy`，消除 slice 共享底层数组的隐式竞态
+
+209. **供应商策略抽离** — 新增 `protocol/vendor_policy.go`：
+    - 从 `openai.go` 抽出 3 个重复的 vendor policy switch：`buildThinkingFields`、`resolveReasoningPolicy`、`defaultHealthEndpoint`
+    - `openai.go` 中 `NewOpenAI` 和 `applyFailover` 的 policy 分配改为调用 `resolveReasoningPolicy(o.vendor)`
+    - `health_manager.go` 的重复 `defaultHealthEndpoint` 删除，统一使用 `vendor_policy.go` 中的版本
+
+210. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（16 包全绿，protocol 测试 96s 完成）
+
+211. **Session 后台自动清理**（`internal/session/manager.go` + `main.go`）：
+    - 新增 `StartCleanup(ctx, interval, maxAge)` 后台 goroutine，定时调用 `Cleanup(maxAge)`
+    - `main.go` 中创建 `sessionMgr` 后调用 `StartCleanup(ctx, 5min, 30min)`，实现自动驱逐过期 session
+    - 解决了 ARCHITECTURE.md Sec 10 标记的 debt
+
+212. **vendor_policy 测试覆盖**（`protocol/vendor_policy_test.go` 新增）：
+    - `TestResolveReasoningPolicy_ThinkingVendors` / `_DefaultVendor`：覆盖所有供应商的策略选择
+    - `TestBuildThinkingFields_DeepSeek` / `_MiniMax` / `_Zhipu` / `_LongCat` / `_Others`：覆盖各 vendor thinking 字段构造
+    - `TestBuildThinkingFields_EffortPolicy`：覆盖 reasoningEffort 路径
+    - `TestDefaultHealthEndpoint`：基础路径拼接
+    - `TestVendorDefaultEffort`：默认 effort 值
+    - 共 8 个新测试，protocol 单测数从 64 → 72

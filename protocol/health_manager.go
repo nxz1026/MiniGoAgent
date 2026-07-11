@@ -74,12 +74,4 @@ func (m *HealthManager) setCheckerStatus(vendor Vendor, status HealthStatus) {
 	}
 }
 
-func defaultHealthEndpoint(v Vendor, baseURL string) string {
-	switch v {
-	case VendorDeepSeek, VendorZhipu, VendorMiniMax, VendorLongCat, VendorOllamaCloud, VendorMiMo, VendorStepFun, VendorQwen:
-		return baseURL + "/models"
-	case VendorUnspecified:
-		return baseURL + "/models"
-	}
-	return ""
-}
+

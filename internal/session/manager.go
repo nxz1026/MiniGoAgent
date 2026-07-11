@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -68,6 +69,24 @@ func (m *Manager) Cleanup(maxAge time.Duration) int {
 		}
 	}
 	return removed
+}
+
+func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration, maxAge time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				removed := m.Cleanup(maxAge)
+				if removed > 0 {
+					// 静默清理，日志由底层框架处理
+				}
+			}
+		}
+	}()
 }
 
 func (m *Manager) Save(path string) error {
