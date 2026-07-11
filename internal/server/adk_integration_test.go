@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"MiniGoAgent/internal/adk"
+	"MiniGoAgent/internal/adk/convert"
 	"MiniGoAgent/internal/adk/event"
 	"MiniGoAgent/internal/adk/llm"
 	adktool "MiniGoAgent/internal/adk/tool"
@@ -49,7 +50,7 @@ type testAgentAdapter struct {
 }
 
 func (a *testAgentAdapter) Generate(ctx context.Context, msgs []*schema.Message) (*schema.Message, error) {
-	adkMsgs := einoToAdk(msgs)
+	adkMsgs := convert.FromEinoSlice(msgs)
 	resp, err := a.runner.Run(ctx, &adktypes.Request{Messages: adkMsgs})
 	if err != nil {
 		return nil, err
@@ -57,11 +58,11 @@ func (a *testAgentAdapter) Generate(ctx context.Context, msgs []*schema.Message)
 	if len(resp.Messages) == 0 {
 		return &schema.Message{Role: schema.Assistant, Content: ""}, nil
 	}
-	return adkToEino(resp.Messages[len(resp.Messages)-1]), nil
+	return convert.ToEino(resp.Messages[len(resp.Messages)-1]), nil
 }
 
 func (a *testAgentAdapter) Stream(ctx context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
-	adkMsgs := einoToAdk(msgs)
+	adkMsgs := convert.FromEinoSlice(msgs)
 	events, err := a.runner.Stream(ctx, &adktypes.Request{Messages: adkMsgs})
 	if err != nil {
 		return nil, err
@@ -79,42 +80,6 @@ func (a *testAgentAdapter) Stream(ctx context.Context, msgs []*schema.Message) (
 		}
 	}()
 	return sr, nil
-}
-
-func einoToAdk(msgs []*schema.Message) []*adktypes.Message {
-	out := make([]*adktypes.Message, len(msgs))
-	for i, m := range msgs {
-		out[i] = &adktypes.Message{
-			Role:             adktypes.Role(m.Role),
-			Content:          m.Content,
-			ReasoningContent: m.ReasoningContent,
-			ToolCallID:       m.ToolCallID,
-			Name:             m.Name,
-		}
-		for _, tc := range m.ToolCalls {
-			out[i].ToolCalls = append(out[i].ToolCalls, adktypes.ToolCall{
-				ID: tc.ID, Type: tc.Type, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
-			})
-		}
-	}
-	return out
-}
-
-func adkToEino(m *adktypes.Message) *schema.Message {
-	msg := &schema.Message{
-		Role:             schema.RoleType(m.Role),
-		Content:          m.Content,
-		ReasoningContent: m.ReasoningContent,
-		ToolCallID:       m.ToolCallID,
-		Name:             m.Name,
-	}
-	for _, tc := range m.ToolCalls {
-		msg.ToolCalls = append(msg.ToolCalls, schema.ToolCall{
-			ID: tc.ID, Type: tc.Type,
-			Function: schema.FunctionCall{Name: tc.Name, Arguments: tc.Arguments},
-		})
-	}
-	return msg
 }
 
 type simplePromptProvider struct{}

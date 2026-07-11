@@ -663,26 +663,236 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 		o.eventBus.TryPublish(Chunk{Type: ChunkRawResponse, Text: headerBuf.String()})
 	}
 
-	idleTimeout := o.streamTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = 120 * time.Second
-	}
-	done := make(chan struct{})
+	resetStall, stalled, done := startStallGuard(ctx, resp.Body, idleTimeout(o.streamTimeout))
 	defer close(done)
+	o.logf(ctx, "RAW readStream stall watchdog started timeout=%v", idleTimeout(o.streamTimeout))
+
+	state := &readStreamState{
+		out:  out,
+		ctx:  ctx,
+		o:    o,
+		acc:  map[int]*ToolCall{},
+		started: map[int]bool{},
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		resetStall()
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			sendChunk(ctx, out, Chunk{Type: ChunkDone})
+			break
+		}
+
+		stop, err := o.processSSEData(data, state)
+		if err != nil {
+			return emitted, o.streamErr(emitted, err)
+		}
+		if stop {
+			return emitted, nil
+		}
+		emitted = state.emitted
+	}
+
+	if err := scanner.Err(); err != nil {
+		return emitted, o.streamErr(emitted, fmt.Errorf("scanner error: %w", err))
+	}
+	if stalled.Load() {
+		o.logf(ctx, "RAW stream idle timeout after %v", idleTimeout(o.streamTimeout))
+		sendChunk(ctx, out, Chunk{Type: ChunkError, Error: fmt.Errorf("stream idle timeout")})
+		return emitted, o.streamErr(emitted, fmt.Errorf("stream idle timeout"))
+	}
+	o.logf(ctx, "RAW stream EOF emitted=%v", emitted)
+	return emitted, nil
+}
+
+type readStreamState struct {
+	out     chan<- Chunk
+	ctx     context.Context
+	o       *OpenAI
+
+	acc     map[int]*ToolCall
+	started map[int]bool
+	order   []int
+	think   thinkSplitter
+	emitted bool
+}
+
+func (s *readStreamState) send(ch Chunk) bool {
+	select {
+	case s.out <- ch:
+		s.emitted = true
+		s.o.eventBus.TryPublish(ch)
+		return true
+	case <-s.ctx.Done():
+		return false
+	}
+}
+
+func (s *readStreamState) sendErr(err error) bool {
+	return s.send(Chunk{Type: ChunkError, Error: s.o.streamErr(s.emitted, err)})
+}
+
+func (o *OpenAI) processSSEData(data string, state *readStreamState) (stop bool, _ error) {
+	var sr struct {
+		Choices []struct {
+			Delta struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
+				ToolCalls        []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+		Error *struct{ Message string } `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(data), &sr); err != nil {
+		return false, nil
+	}
+	if sr.Error != nil {
+		state.sendErr(fmt.Errorf("%s", sr.Error.Message))
+		return false, fmt.Errorf("API stream error: %s", sr.Error.Message)
+	}
+	if sr.Usage != nil {
+		u := &Usage{
+			PromptTokens:     sr.Usage.PromptTokens,
+			CompletionTokens: sr.Usage.CompletionTokens,
+			TotalTokens:      sr.Usage.TotalTokens,
+		}
+		o.usageMu.Lock()
+		o.lastUsage = u
+		o.usageMu.Unlock()
+		state.send(Chunk{Type: ChunkUsage, Usage: u})
+		o.sendContextWarning(state.ctx, state.out, u)
+	}
+	if len(sr.Choices) == 0 {
+		return false, nil
+	}
+
+	delta := sr.Choices[0].Delta
+
+	reasoningDelta := delta.ReasoningContent
+	if reasoningDelta == "" {
+		reasoningDelta = delta.Reasoning
+	}
+	if reasoningDelta != "" {
+		if !state.send(Chunk{Type: ChunkReasoning, Text: reasoningDelta}) {
+			return false, state.ctx.Err()
+		}
+	}
+
+	if delta.Content != "" {
+		if o.vendor == VendorMiniMax {
+			r, txt := state.think.push(delta.Content)
+			if r != "" {
+				if !state.send(Chunk{Type: ChunkReasoning, Text: r}) {
+					return false, state.ctx.Err()
+				}
+			}
+			if txt != "" {
+				if !state.send(Chunk{Type: ChunkText, Text: txt}) {
+					return false, state.ctx.Err()
+				}
+			}
+		} else {
+			if !state.send(Chunk{Type: ChunkText, Text: delta.Content}) {
+				return false, state.ctx.Err()
+			}
+		}
+	}
+
+	for _, tc := range delta.ToolCalls {
+		cur, ok := state.acc[tc.Index]
+		if !ok {
+			cur = &ToolCall{}
+			state.acc[tc.Index] = cur
+			state.order = append(state.order, tc.Index)
+		}
+		if tc.ID != "" {
+			cur.ID = tc.ID
+		}
+		if tc.Function.Name != "" {
+			cur.Name = tc.Function.Name
+		}
+		cur.Arguments += tc.Function.Arguments
+		if !state.started[tc.Index] && cur.Name != "" {
+			state.started[tc.Index] = true
+			if !state.send(Chunk{Type: ChunkToolCallStart, ToolCall: &ToolCall{ID: cur.ID, Name: cur.Name}}) {
+				return false, state.ctx.Err()
+			}
+		}
+	}
+
+	if sr.Choices[0].FinishReason != nil && *sr.Choices[0].FinishReason != "" {
+		r, _ := state.think.flush()
+		if r != "" {
+			if !state.send(Chunk{Type: ChunkReasoning, Text: r}) {
+				return false, state.ctx.Err()
+			}
+		}
+		for _, idx := range state.order {
+			if tc := state.acc[idx]; tc != nil {
+				if tc.ID == "" {
+					tc.ID = fmt.Sprintf("call_%d", idx)
+				}
+				if !state.send(Chunk{Type: ChunkToolCall, ToolCall: tc}) {
+					return false, state.ctx.Err()
+				}
+			}
+		}
+		state.send(Chunk{Type: ChunkDone})
+		return true, nil
+	}
+	return false, nil
+}
+
+func idleTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 120 * time.Second
+	}
+	return d
+}
+
+func startStallGuard(ctx context.Context, body io.ReadCloser, timeout time.Duration) (reset func(), stalled *atomic.Bool, done chan struct{}) {
+	done = make(chan struct{})
+	var st atomic.Bool
 	activity := make(chan struct{}, 1)
-	o.logf(ctx, "RAW readStream stall watchdog started timeout=%v", idleTimeout)
-	var stalled atomic.Bool
+	reset = func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
 	go func() {
-		idle := time.NewTimer(idleTimeout)
+		idle := time.NewTimer(timeout)
 		defer idle.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				resp.Body.Close()
+				body.Close()
 				return
 			case <-idle.C:
-				stalled.Store(true)
-				resp.Body.Close()
+				st.Store(true)
+				body.Close()
 				return
 			case <-activity:
 				if !idle.Stop() {
@@ -691,184 +901,11 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 					default:
 					}
 				}
-				idle.Reset(idleTimeout)
+				idle.Reset(timeout)
 			case <-done:
 				return
 			}
 		}
 	}()
-
-	acc := map[int]*ToolCall{}
-	started := map[int]bool{}
-	var order []int
-	var think thinkSplitter
-
-	send := func(ch Chunk) bool {
-		select {
-		case out <- ch:
-			emitted = true
-			o.eventBus.TryPublish(ch)
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
-	sendErr := func(err error) bool {
-		return send(Chunk{Type: ChunkError, Error: o.streamErr(emitted, err)})
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		select {
-		case activity <- struct{}{}:
-		default:
-		}
-
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "[DONE]" {
-			send(Chunk{Type: ChunkDone})
-			break
-		}
-
-		var sr struct {
-			Choices []struct {
-				Delta struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
-					Reasoning        string `json:"reasoning"`
-					ToolCalls        []struct {
-						Index    int    `json:"index"`
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-				FinishReason *string `json:"finish_reason"`
-			} `json:"choices"`
-			Usage *struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				TotalTokens      int `json:"total_tokens"`
-			} `json:"usage"`
-			Error *struct{ Message string } `json:"error"`
-		}
-		if err := json.Unmarshal([]byte(data), &sr); err != nil {
-			continue
-		}
-		if sr.Error != nil {
-			sendErr(fmt.Errorf("%s", sr.Error.Message))
-			err := fmt.Errorf("API stream error: %s", sr.Error.Message)
-			return emitted, o.streamErr(emitted, err)
-		}
-		if sr.Usage != nil {
-			u := &Usage{
-				PromptTokens:     sr.Usage.PromptTokens,
-				CompletionTokens: sr.Usage.CompletionTokens,
-				TotalTokens:      sr.Usage.TotalTokens,
-			}
-			o.usageMu.Lock()
-			o.lastUsage = u
-			o.usageMu.Unlock()
-			send(Chunk{Type: ChunkUsage, Usage: u})
-			o.sendContextWarning(ctx, out, u)
-		}
-		if len(sr.Choices) == 0 {
-			continue
-		}
-
-		delta := sr.Choices[0].Delta
-
-		reasoningDelta := delta.ReasoningContent
-		if reasoningDelta == "" {
-			reasoningDelta = delta.Reasoning
-		}
-		if reasoningDelta != "" {
-			if !send(Chunk{Type: ChunkReasoning, Text: reasoningDelta}) {
-				return emitted, o.streamErr(emitted, ctx.Err())
-			}
-		}
-
-		if delta.Content != "" {
-			if o.vendor == VendorMiniMax {
-				r, txt := think.push(delta.Content)
-				if r != "" {
-					if !send(Chunk{Type: ChunkReasoning, Text: r}) {
-						return emitted, o.streamErr(emitted, ctx.Err())
-					}
-				}
-				if txt != "" {
-					if !send(Chunk{Type: ChunkText, Text: txt}) {
-						return emitted, o.streamErr(emitted, ctx.Err())
-					}
-				}
-			} else {
-				if !send(Chunk{Type: ChunkText, Text: delta.Content}) {
-					return emitted, o.streamErr(emitted, ctx.Err())
-				}
-			}
-		}
-
-		for _, tc := range delta.ToolCalls {
-			cur, ok := acc[tc.Index]
-			if !ok {
-				cur = &ToolCall{}
-				acc[tc.Index] = cur
-				order = append(order, tc.Index)
-			}
-			if tc.ID != "" {
-				cur.ID = tc.ID
-			}
-			if tc.Function.Name != "" {
-				cur.Name = tc.Function.Name
-			}
-			cur.Arguments += tc.Function.Arguments
-			if !started[tc.Index] && cur.Name != "" {
-				started[tc.Index] = true
-				if !send(Chunk{Type: ChunkToolCallStart, ToolCall: &ToolCall{ID: cur.ID, Name: cur.Name}}) {
-					return emitted, o.streamErr(emitted, ctx.Err())
-				}
-			}
-		}
-
-		if sr.Choices[0].FinishReason != nil && *sr.Choices[0].FinishReason != "" {
-			r, _ := think.flush()
-			if r != "" {
-				if !send(Chunk{Type: ChunkReasoning, Text: r}) {
-					return emitted, o.streamErr(emitted, ctx.Err())
-				}
-			}
-			for _, idx := range order {
-				if tc := acc[idx]; tc != nil {
-					if tc.ID == "" {
-						tc.ID = fmt.Sprintf("call_%d", idx)
-					}
-					if !send(Chunk{Type: ChunkToolCall, ToolCall: tc}) {
-						return emitted, o.streamErr(emitted, ctx.Err())
-					}
-				}
-			}
-			send(Chunk{Type: ChunkDone})
-			return emitted, nil
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return emitted, o.streamErr(emitted, fmt.Errorf("scanner error: %w", err))
-	}
-	if stalled.Load() {
-		o.logf(ctx, "RAW stream idle timeout after %v", idleTimeout)
-		sendErr(fmt.Errorf("stream idle timeout"))
-		return emitted, o.streamErr(emitted, fmt.Errorf("stream idle timeout"))
-	}
-	o.logf(ctx, "RAW stream EOF emitted=%v", emitted)
-	return emitted, nil
+	return reset, &st, done
 }

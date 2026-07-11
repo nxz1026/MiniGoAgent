@@ -788,3 +788,18 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
 218. **P2-2（一般）** — `internal/adk/react.go` `Run()` 改为调用 `a.inner.Stream()` 替代 `Generate()`，从 stream 收集完整消息链返回 `resp.Messages`；`main.go` `agentAdapter.Generate` 取 `resp.Messages[len-1]`（末条 assistant 回复）替代 `[0]`（首条可能为中间步骤）；同步修复 `internal/server/adk_integration_test.go` 中 5 个测试的 mock `streamFn`（因 ReactAgent.Run 改用 Stream 内部，mock 需同时提供 streamFn）
 219. **P2-3（一般）** — `protocol/content_compress.go` compressCache 从 `map[string]compressCacheEntry{}` + `sync.RWMutex` + 手动 evict（满 500 删 50）改为 `github.com/hashicorp/golang-lru/v2/expirable.NewLRU[string,string](500, nil, 30s)`，自动 LRU 驱逐 + TTL 过期，代码精简 30 行；go.mod 新增依赖
 220. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（16 包全绿，protocol 测试 96s 完成）；`go mod tidy` 通过
+
+### 第三十五轮（2026-07-11）：P3 优化 — openai.go readStream 拆分 + ADK MultiContent 字段
+
+221. **P3-1** — `protocol/openai.go` `readStream`（原 222 行）拆分为 4 个函数：
+    - `startStallGuard()` — 独立 stall watchdog，返回 `(reset, stalled, done)` 三值，`reset` 函数由调用方在每次 scanner 迭代时通知，`stalled` 原子变量标识超时
+    - `readStreamState` 结构体 — 封装 `out/ctx/o/acc/started/order/think/emitted` 状态，提供 `send(chunk)` 和 `sendErr(err)` 方法
+    - `processSSEData(data, state)` — 处理单条 SSE data 行，返回 `(stop, error)`，包含 JSON 解析、usage 记录、reasoning/text/tool_call 增量处理、finish_reason 冲洗
+    - `idleTimeout(d)` — 提取超时默认值逻辑
+    - `readStream` 保留为编排层（~40 行），`streamWithFailover` 不变
+222. **P3-2** — `internal/adk/types/types.go` + `convert/convert.go` 补 `MultiContent` 字段：
+    - `adktypes.Message` 新增 `MultiContent []map[string]any` 字段，与 `protocol.Message.MultiContent` 类型一致
+    - `convert.ToEino` 新增 `toEinoMultiContent` 辅助函数，将 `[]map[string]any` 逆转为 `schema.MessageInputPart` 列表填充 `UserInputMultiContent`
+    - `convert.FromEino` 新增 `fromEinoMultiContent` 辅助函数，将 `UserInputMultiContent` 转为 `[]map[string]any`
+    - `internal/server/adk_integration_test.go` 删除重复的 `einoToAdk`/`adkToEino` 函数，改用 `convert.FromEinoSlice`/`convert.ToEino`
+223. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（16 包全绿）
