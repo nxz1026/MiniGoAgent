@@ -169,20 +169,30 @@ const (
 )
 
 type CircuitBreakerOptions struct {
-	Timeout          time.Duration
-	HalfOpenMaxCalls int
-	CheckHTTPCodes   []int
-	CheckErrors      []error
+	Timeout           time.Duration
+	HalfOpenMaxCalls  int
+	CheckHTTPCodes    []int
+	CheckErrors       []error
+	FailureThreshold  int // default 5
+}
+
+func NewCircuitBreaker(opts CircuitBreakerOptions) *CircuitBreaker {
+	if opts.FailureThreshold <= 0 {
+		opts.FailureThreshold = 5
+	}
+	return &CircuitBreaker{
+		failureThreshold: opts.FailureThreshold,
+		options:          opts,
+		state:            Closed,
+	}
 }
 
 type CircuitBreaker struct {
 	failureThreshold int
-	failureRate      float64
 	lastFailure      time.Time
 	state            CircuitBreakerState
 	options          CircuitBreakerOptions
-	mutex            sync.RWMutex
-	keyMu            sync.Mutex
+	mutex            sync.Mutex
 }
 
 func (cb *CircuitBreaker) isFailure(err error) bool {
@@ -248,8 +258,11 @@ func (cb *CircuitBreaker) Success() {
 	defer cb.mutex.Unlock()
 
 	if cb.state == HalfOpen {
-		cb.failureThreshold = 5
+		cb.failureThreshold = cb.options.FailureThreshold
 		cb.state = Closed
+	}
+	if cb.state == Closed {
+		cb.failureThreshold = cb.options.FailureThreshold
 	}
 }
 

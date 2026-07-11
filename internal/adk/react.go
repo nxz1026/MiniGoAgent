@@ -3,6 +3,7 @@ package adk
 import (
 	"context"
 	"fmt"
+	"io"
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -141,13 +142,30 @@ func NewReactAgent(ctx context.Context, cfg *AgentConfig) (*ReactAgent, error) {
 
 func (a *ReactAgent) Run(ctx context.Context, req *adktypes.Request) (*adktypes.Response, error) {
 	msgs := convert.ToEinoSlice(req.Messages)
-	result, err := a.inner.Generate(ctx, msgs)
+	sr, err := a.inner.Stream(ctx, msgs)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("agent stream: %w", err)
+	}
+	defer sr.Close()
+
+	var allMsgs []*schema.Message
+	for {
+		msg, err := sr.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("agent stream recv: %w", err)
+		}
+		allMsgs = append(allMsgs, msg)
+	}
+
+	if len(allMsgs) == 0 {
+		return nil, fmt.Errorf("agent returned no messages")
 	}
 
 	return &adktypes.Response{
-		Messages: convert.FromEinoSlice([]*schema.Message{result}),
+		Messages: convert.FromEinoSlice(allMsgs),
 		Stats:    a.bridge.StatsLine(),
 	}, nil
 }

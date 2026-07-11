@@ -288,10 +288,7 @@ First implementation should prefer offline Python scripts over a mandatory alway
 - `reference/eino` is a local replace dependency and currently appears as an abnormal/untracked git status item in this workspace.
 - README and MEMO are append-heavy and can contain old counts in earlier sections; latest sections are authoritative.
 - Some integration behavior depends on external provider compatibility and is not covered by network-free tests.
-- `EventBus.Publish` drops events when subscriber channels are full; telemetry/log gaps may occur under high load.
-- `internal/adk/tool/registry.go` `Check()` TOCTOU race mitigated by holding `r.mu.RLock()` during `t.Check(ctx)`, but still subject to cache stampede under extreme concurrency.
-- `compressCache` eviction deletes 50 entries at a time when over capacity — acceptable for current scale but lacks LRU/TTL for production workloads.
-### Resolved in 2026-07-11 (Round 32+33)
+### Resolved in 2026-07-11 (Round 32+33+34)
 
 These were listed as debt in earlier versions and are now fixed:
 
@@ -309,6 +306,11 @@ These were listed as debt in earlier versions and are now fixed:
 - Session storage no background eviction → `Manager.StartCleanup(ctx, interval, maxAge)` background goroutine (`internal/session/manager.go:73`)
 - Vendor policy switch duplication across `openai.go`/`health_manager.go` → centralized in `protocol/vendor_policy.go`
 - Vendor policy functions untested → `protocol/vendor_policy_test.go` (8 tests)
+- `EventBus.Publish` backpressure blocked stream emit → `TryPublish` non-blocking send (`protocol/openai.go`)
+- `UsageTracker.Record` DB write under exclusive lock blocked stats queries → prepared statement + `RLock` for read, `stMu.Lock()` for write (`protocol/usage_tracker.go`)
+- `tool/registry.go` `Check()` TOCTOU race (`r.Get` outside lock) → `t.Check(ctx)` inside `r.mu.RLock()` (`internal/adk/tool/registry.go`)
+- `compressCache` manual map+mutex+stale eviction (500 cap, batch-50 evict, no LRU) → `golang-lru/v2/expirable.NewLRU` with automatic LRU eviction and 30s TTL (`protocol/content_compress.go`)
+- `CircuitBreaker` global `failureRate` field unused, `Success()` not resetting in Closed state, no constructor → `NewCircuitBreaker` with `FailureThreshold`, `Success()` resets counter in Closed, removed `failureRate` (`protocol/types.go`)
 
 ---
 

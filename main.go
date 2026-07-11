@@ -49,7 +49,7 @@ func (a *agentAdapter) Generate(ctx context.Context, msgs []*schema.Message) (*s
 	if len(resp.Messages) == 0 {
 		return &schema.Message{Role: schema.Assistant, Content: ""}, nil
 	}
-	return convert.ToEino(resp.Messages[0]), nil
+	return convert.ToEino(resp.Messages[len(resp.Messages)-1]), nil
 }
 
 func (a *agentAdapter) Stream(ctx context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {

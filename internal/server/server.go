@@ -215,20 +215,7 @@ func (s *Server) HandleVision(w http.ResponseWriter, r *http.Request) {
 
 	sid := s.sessionID(r)
 	ctx := s.injectLogCtx(r.Context(), sid)
-	visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
-	if err != nil {
-		json.NewEncoder(w).Encode(chatResp{Reply: "Vision 错误: " + err.Error()})
-		return
-	}
-	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + req.Prompt + "\n\n图片分析结果：\n" + visionResult)
-	msgs := s.sessions.SnapshotWith(sid, userMsg)
-	result, err := s.agent.Generate(ctx, msgs)
-	if err != nil {
-		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
-		return
-	}
-	s.sessions.Append(sid, userMsg, result)
-	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
+	s.processVisionNonStream(w, ctx, sid, req.Image, req.Prompt)
 }
 
 func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request) {
@@ -243,8 +230,6 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 	}
 
 	sid := s.sessionID(r)
-	msgs := s.sessions.SnapshotWith(sid)
-
 	s.logUserMessage(sid, "[图片] "+req.Prompt)
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -257,52 +242,56 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 	}
 
 	ctx := s.injectLogCtx(r.Context(), sid)
+	s.processVisionStream(w, flusher, ctx, sid, req.Image, req.Prompt)
+}
 
-	if !supportsVision(s.model.Model()) {
-		visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: req.Image, Prompt: req.Prompt})
-		if err != nil {
-			fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
-			flusher.Flush()
-			return
-		}
-		data, err := json.Marshal(map[string]any{"content": "图片分析结果：\n" + visionResult})
-		if err != nil {
-			log.Debug("marshal vision result: %v", err)
-			return
-		}
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
+func (s *Server) handleVisionFromChat(w http.ResponseWriter, r *http.Request, sid, img, prompt string) {
+	ctx := s.injectLogCtx(r.Context(), sid)
+	s.processVisionNonStream(w, ctx, sid, img, prompt)
+}
 
-		s.sessions.Append(sid,
-			schema.UserMessage("[图片] "+req.Prompt+"\n\n图片分析结果：\n"+visionResult),
-			&schema.Message{Role: schema.Assistant, Content: visionResult},
-		)
+// processVisionNonStream handles vision processing for non-streaming endpoints
+func (s *Server) processVisionNonStream(w http.ResponseWriter, ctx context.Context, sid, imageURL, prompt string) {
+	userMsg, visionResult, isNative, err := s.prepareVisionMessage(ctx, imageURL, prompt)
+	if err != nil {
+		json.NewEncoder(w).Encode(chatResp{Reply: "图片处理失败: " + err.Error()})
 		return
 	}
 
-	dataURL, err := imageToDataURL(ctx, req.Image)
+	var msgs []*schema.Message
+	if isNative {
+		msgs = s.sessions.SnapshotWith(sid, userMsg)
+	} else {
+		// Fallback: wrap vision result in user message
+		fallbackMsg := schema.UserMessage("用户上传了一张图片，提问：" + prompt + "\n\n图片分析结果：\n" + visionResult)
+		msgs = s.sessions.SnapshotWith(sid, fallbackMsg)
+	}
+
+	result, err := s.agent.Generate(ctx, msgs)
+	if err != nil {
+		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
+		return
+	}
+	s.sessions.Append(sid, userMsg, result)
+	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
+}
+
+// processVisionStream handles vision processing for streaming endpoints
+func (s *Server) processVisionStream(w http.ResponseWriter, flusher http.Flusher, ctx context.Context, sid, imageURL, prompt string) {
+	userMsg, visionResult, isNative, err := s.prepareVisionMessage(ctx, imageURL, prompt)
 	if err != nil {
 		fmt.Fprintf(w, "data: {\"error\":%q}\n\n", err.Error())
 		flusher.Flush()
 		return
 	}
 
-	textPart := schema.MessageInputPart{
-		Type: schema.ChatMessagePartTypeText,
-		Text: req.Prompt,
+	var msgs []*schema.Message
+	if isNative {
+		msgs = s.sessions.SnapshotWith(sid, userMsg)
+	} else {
+		fallbackMsg := schema.UserMessage("[图片] " + prompt + "\n\n图片分析结果：\n" + visionResult)
+		msgs = s.sessions.SnapshotWith(sid, fallbackMsg)
 	}
-	imagePart := schema.MessageInputPart{
-		Type: schema.ChatMessagePartTypeImageURL,
-		Image: &schema.MessageInputImage{
-			MessagePartCommon: schema.MessagePartCommon{URL: strPtr(dataURL)},
-		},
-	}
-	userMsg := &schema.Message{
-		Role:                  schema.User,
-		Content:               "[图片] " + req.Prompt,
-		UserInputMultiContent: []schema.MessageInputPart{textPart, imagePart},
-	}
-	msgs = append(msgs, userMsg)
 
 	stream, err := s.agent.Stream(ctx, msgs)
 	if err != nil {
@@ -340,13 +329,13 @@ func (s *Server) HandleVisionNativeStream(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func (s *Server) handleVisionFromChat(w http.ResponseWriter, r *http.Request, sid, img, prompt string) {
-	ctx := s.injectLogCtx(r.Context(), sid)
+// prepareVisionMessage prepares the user message for vision processing.
+// Returns: userMsg (for native vision), visionResult (for fallback), isNative, error
+func (s *Server) prepareVisionMessage(ctx context.Context, imageURL, prompt string) (*schema.Message, string, bool, error) {
 	if supportsVision(s.model.Model()) {
-		dataURL, err := imageToDataURL(ctx, img)
+		dataURL, err := imageToDataURL(ctx, imageURL)
 		if err != nil {
-			json.NewEncoder(w).Encode(chatResp{Reply: "图片处理失败: " + err.Error()})
-			return
+			return nil, "", false, err
 		}
 		textPart := schema.MessageInputPart{
 			Type: schema.ChatMessagePartTypeText,
@@ -363,30 +352,14 @@ func (s *Server) handleVisionFromChat(w http.ResponseWriter, r *http.Request, si
 			Content:               "[图片] " + prompt,
 			UserInputMultiContent: []schema.MessageInputPart{textPart, imagePart},
 		}
-		msgs := s.sessions.SnapshotWith(sid, userMsg)
-		result, err := s.agent.Generate(ctx, msgs)
-		if err != nil {
-			json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
-			return
-		}
-		s.sessions.Append(sid, userMsg, result)
-		json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
-		return
+		return userMsg, "", true, nil
 	}
-	visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: img, Prompt: prompt})
+	// Fallback to vision tool
+	visionResult, err := tools.RunVision(ctx, tools.VisionInput{ImageURL: imageURL, Prompt: prompt})
 	if err != nil {
-		json.NewEncoder(w).Encode(chatResp{Reply: "Vision 错误: " + err.Error()})
-		return
+		return nil, "", false, err
 	}
-	userMsg := schema.UserMessage("用户上传了一张图片，提问：" + prompt + "\n\n图片分析结果：\n" + visionResult)
-	msgs := s.sessions.SnapshotWith(sid, userMsg)
-	result, err := s.agent.Generate(ctx, msgs)
-	if err != nil {
-		json.NewEncoder(w).Encode(chatResp{Reply: "错误: " + err.Error()})
-		return
-	}
-	s.sessions.Append(sid, userMsg, result)
-	json.NewEncoder(w).Encode(chatResp{Reply: result.Content, Stats: s.getStatsMap()})
+	return nil, visionResult, false, nil
 }
 
 func (s *Server) logUserMessage(sid, text string) {

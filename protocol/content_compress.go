@@ -5,22 +5,12 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
+
+	lru "github.com/hashicorp/golang-lru/v2/expirable"
 )
 
-var (
-	compressCache   = map[string]compressCacheEntry{}
-	compressCacheMu sync.RWMutex
-)
-
-type compressCacheEntry struct {
-	result    string
-	timestamp time.Time
-}
-
-const compressCacheTTL = 30 * time.Second
-const compressCacheMax = 500
+var compressCache = lru.NewLRU[string, string](500, nil, 30*time.Second)
 
 func CachedCompressContent(content string, ct ContentType) string {
 	if len(content) < 256 {
@@ -29,28 +19,12 @@ func CachedCompressContent(content string, ct ContentType) string {
 	h := sha256.Sum256([]byte(content))
 	key := fmt.Sprintf("%x-%d", h[:8], ct)
 
-	compressCacheMu.RLock()
-	entry, ok := compressCache[key]
-	compressCacheMu.RUnlock()
-	if ok && time.Since(entry.timestamp) < compressCacheTTL {
-		return entry.result
+	if result, ok := compressCache.Get(key); ok {
+		return result
 	}
 
 	result := CompressContent(content, ct)
-
-	compressCacheMu.Lock()
-	if len(compressCache) >= compressCacheMax {
-		deleted := 0
-		for k := range compressCache {
-			delete(compressCache, k)
-			deleted++
-			if deleted >= 50 {
-				break
-			}
-		}
-	}
-	compressCache[key] = compressCacheEntry{result: result, timestamp: time.Now()}
-	compressCacheMu.Unlock()
+	compressCache.Add(key, result)
 	return result
 }
 

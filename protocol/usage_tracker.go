@@ -24,8 +24,10 @@ type UsageRecord struct {
 }
 
 type UsageTracker struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db    *sql.DB
+	stmt  *sql.Stmt
+	mu    sync.RWMutex
+	stMu  sync.Mutex // protects stmt.Exec
 }
 
 func NewUsageTracker(dbPath string) (*UsageTracker, error) {
@@ -63,18 +65,29 @@ func NewUsageTracker(dbPath string) (*UsageTracker, error) {
 		db.Close()
 		return nil, fmt.Errorf("create index: %w", err)
 	}
-	return &UsageTracker{db: db}, nil
+	stmt, err := db.Prepare(`INSERT INTO usage_records(session_id, model, vendor, duration, prompt_tokens, completion_tokens, total_tokens, created_at) VALUES(?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("prepare insert: %w", err)
+	}
+	return &UsageTracker{db: db, stmt: stmt}, nil
 }
 
 func (ut *UsageTracker) Record(sessionID, model, vendor string, durSec float64, promptTks, completionTks int) error {
 	total := promptTks + completionTks
 	now := time.Now().UTC().Format(time.RFC3339)
-	ut.mu.Lock()
-	defer ut.mu.Unlock()
-	_, err := ut.db.Exec(
-		`INSERT INTO usage_records(session_id, model, vendor, duration, prompt_tokens, completion_tokens, total_tokens, created_at) VALUES(?,?,?,?,?,?,?,?)`,
-		sessionID, model, vendor, durSec, promptTks, completionTks, total, now,
-	)
+	
+	ut.mu.RLock()
+	stmt := ut.stmt
+	ut.mu.RUnlock()
+	
+	if stmt == nil {
+		return fmt.Errorf("usage tracker closed")
+	}
+	
+	ut.stMu.Lock()
+	_, err := stmt.Exec(sessionID, model, vendor, durSec, promptTks, completionTks, total, now)
+	ut.stMu.Unlock()
 	return err
 }
 
@@ -168,5 +181,9 @@ func (ut *UsageTracker) GetStats() (UsageStats, error) {
 func (ut *UsageTracker) Close() error {
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
+	if ut.stmt != nil {
+		_ = ut.stmt.Close()
+		ut.stmt = nil
+	}
 	return ut.db.Close()
 }

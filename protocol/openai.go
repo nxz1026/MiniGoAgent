@@ -707,7 +707,7 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 		select {
 		case out <- ch:
 			emitted = true
-			_ = o.eventBus.Publish(ctx, ch)
+			o.eventBus.TryPublish(ch)
 			return true
 		case <-ctx.Done():
 			return false

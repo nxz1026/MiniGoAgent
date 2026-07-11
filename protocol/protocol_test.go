@@ -558,11 +558,10 @@ func TestMockStreamError(t *testing.T) {
 }
 
 func TestCircuitBreaker_Closed(t *testing.T) {
-	cb := &CircuitBreaker{
-		failureThreshold: 5,
-		failureRate:      0.6,
-		options:          CircuitBreakerOptions{Timeout: time.Minute},
-	}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{
+		FailureThreshold: 5,
+		Timeout:          time.Minute,
+	})
 
 	testErr := fmt.Errorf("test error")
 
@@ -581,13 +580,15 @@ func TestCircuitBreaker_Closed(t *testing.T) {
 
 func TestCircuitBreaker_Open(t *testing.T) {
 	now := time.Now()
-	cb := &CircuitBreaker{
-		failureThreshold: 5,
-		failureRate:      0.6,
-		lastFailure:      now,
-		state:            Open,
-		options:          CircuitBreakerOptions{Timeout: time.Minute},
-	}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{
+		FailureThreshold: 5,
+		Timeout:          time.Minute,
+	})
+	// Force to Open state
+	cb.mutex.Lock()
+	cb.state = Open
+	cb.lastFailure = now
+	cb.mutex.Unlock()
 
 	// open状态下，拒绝所有请求
 	for i := 0; i < 3; i++ {
@@ -599,17 +600,25 @@ func TestCircuitBreaker_Open(t *testing.T) {
 
 func TestCircuitBreaker_HalfOpen(t *testing.T) {
 	now := time.Now()
-	cb := &CircuitBreaker{
-		failureThreshold: 5,
-		failureRate:      0.6,
-		lastFailure:      now.Add(-10 * time.Second), // 足够早
-		state:            HalfOpen,
-		options:          CircuitBreakerOptions{Timeout: time.Minute, HalfOpenMaxCalls: 5},
-	}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{
+		FailureThreshold: 5,
+		Timeout:          time.Minute,
+		HalfOpenMaxCalls: 5,
+	})
+	// Force to HalfOpen state
+	cb.mutex.Lock()
+	cb.state = HalfOpen
+	cb.lastFailure = now.Add(-10 * time.Second)
+	cb.mutex.Unlock()
 
 	// half-open状态允许后续请求
 	if !cb.Check(nil) {
 		t.Fatalf("expected success in half-open state")
+	}
+	// success回调应该将状态恢复到closed
+	cb.Success()
+	if cb.state != Closed {
+		t.Fatalf("expected state to be closed after success, got %v", cb.state)
 	}
 }
 
@@ -773,11 +782,10 @@ func TestRetryNotifyContext(t *testing.T) {
 }
 
 func TestSendWithRetry_CircuitBreakerIntegration(t *testing.T) {
-	cb := &CircuitBreaker{
-		failureThreshold: 3,
-		failureRate:      1.0,
-		options:          CircuitBreakerOptions{Timeout: 5 * time.Minute},
-	}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{
+		FailureThreshold: 3,
+		Timeout:          5 * time.Minute,
+	})
 	vendorCircuitBreaker.Store(VendorUnspecified, cb)
 	defer vendorCircuitBreaker.Delete(VendorUnspecified)
 
@@ -800,12 +808,14 @@ func TestSendWithRetry_CircuitBreakerIntegration(t *testing.T) {
 }
 
 func TestSendWithRetry_CircuitBreakerAuthSuccess(t *testing.T) {
-	cb := &CircuitBreaker{
-		failureThreshold: 3,
-		failureRate:      1.0,
-		state:            HalfOpen,
-		options:          CircuitBreakerOptions{Timeout: 5 * time.Minute},
-	}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{
+		FailureThreshold: 3,
+		Timeout:          5 * time.Minute,
+	})
+	// Force to HalfOpen
+	cb.mutex.Lock()
+	cb.state = HalfOpen
+	cb.mutex.Unlock()
 	vendorCircuitBreaker.Store(VendorUnspecified, cb)
 	defer vendorCircuitBreaker.Delete(VendorUnspecified)
 
@@ -955,7 +965,7 @@ func TestHealthChecker_Healthy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{FailureThreshold: 3, Timeout: time.Minute})
 	checker := NewHealthChecker(VendorUnspecified, srv.URL, 30*time.Second, cb)
 	checker.check(context.Background())
 
@@ -973,7 +983,7 @@ func TestHealthChecker_Unhealthy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{FailureThreshold: 3, Timeout: time.Minute})
 	checker := NewHealthChecker(VendorUnspecified, srv.URL, 30*time.Second, cb)
 	checker.check(context.Background())
 
@@ -994,7 +1004,7 @@ func TestHealthManager_RegisterGetStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{FailureThreshold: 3, Timeout: time.Minute})
 	hm.Register(VendorUnspecified, srv.URL, 30*time.Second, cb)
 
 	status := hm.GetStatus(VendorUnspecified)
@@ -1007,7 +1017,10 @@ func TestSendWithRetry_HealthShortCircuit(t *testing.T) {
 	hm := NewHealthManager(context.Background())
 	defer hm.Stop()
 
-	cb := &CircuitBreaker{failureThreshold: 3, failureRate: 1.0, state: HalfOpen, options: CircuitBreakerOptions{Timeout: time.Minute}}
+	cb := NewCircuitBreaker(CircuitBreakerOptions{FailureThreshold: 3, Timeout: time.Minute})
+	cb.mutex.Lock()
+	cb.state = HalfOpen
+	cb.mutex.Unlock()
 	vendorHealthManager = hm
 	vendorCircuitBreaker.Store(VendorUnspecified, cb)
 	defer func() {

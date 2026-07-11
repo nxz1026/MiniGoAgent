@@ -1,6 +1,6 @@
 # MiniGoAgent 项目备忘录
 
-> 最后更新：2026-07-09
+> 最后更新：2026-07-11
 > 用途：给 LLM 提供完整项目上下文，避免重复发现
 > 铁律1：任何时候思考都用中文
 > 铁律2：每次阶段任务完成后必须必须必须（没有商量的余地）必须测试，然后迭代本文档（MEMO.md）
@@ -777,3 +777,14 @@ go test -tags=integration ./protocol/ # 9 集成测试（需 API key）
     - `TestDefaultHealthEndpoint`：基础路径拼接
     - `TestVendorDefaultEffort`：默认 effort 值
     - 共 8 个新测试，protocol 单测数从 64 → 72
+
+### 第三十四轮（2026-07-11）：Code Review 修复 P0-P3（流式背压/UsageTracker 写锁分离/TOCTOU/Vision 统一/断路器/ReactAgent 流式采集/LRU 缓存）
+
+213. **P0-2（阻塞）** — `protocol/openai.go` `readStream` 中 `Publish` → `TryPublish`，避免背压阻塞流式响应 emit
+214. **P1-1（重要）** — `protocol/usage_tracker.go` `Record` 重构：引入预编译 `stmt`，`Record` 改 `RLock` 读 stmt 指针，`stMu.Lock()` 保护并发 `Exec`，SQLite 写入不阻塞 `GetStats`/`Query`
+215. **P1-2（重要）** — `internal/adk/tool/registry.go` `Check()` 中 `t.Check(ctx)` 移至 `r.mu.RLock()` 保护内，消除 TOCTOU 竞态
+216. **P1-3（重要）** — `internal/server/server.go` Vision 逻辑重构：抽取 `prepareVisionMessage`、`processVisionNonStream`、`processVisionStream` 三个私有方法，消除 `HandleVision`/`HandleVisionNativeStream`/`handleVisionFromChat` 三处重复的图片转 base64 和消息构建逻辑
+217. **P2-1（一般）** — `protocol/types.go` CircuitBreaker 重构：添加 `NewCircuitBreaker` 构造函数 + `FailureThreshold` 配置（默认 5），`Success()` 在 Closed 态也复位阈值，清理 `failureRate` 字段；更新 9 个测试用例
+218. **P2-2（一般）** — `internal/adk/react.go` `Run()` 改为调用 `a.inner.Stream()` 替代 `Generate()`，从 stream 收集完整消息链返回 `resp.Messages`；`main.go` `agentAdapter.Generate` 取 `resp.Messages[len-1]`（末条 assistant 回复）替代 `[0]`（首条可能为中间步骤）；同步修复 `internal/server/adk_integration_test.go` 中 5 个测试的 mock `streamFn`（因 ReactAgent.Run 改用 Stream 内部，mock 需同时提供 streamFn）
+219. **P2-3（一般）** — `protocol/content_compress.go` compressCache 从 `map[string]compressCacheEntry{}` + `sync.RWMutex` + 手动 evict（满 500 删 50）改为 `github.com/hashicorp/golang-lru/v2/expirable.NewLRU[string,string](500, nil, 30s)`，自动 LRU 驱逐 + TTL 过期，代码精简 30 行；go.mod 新增依赖
+220. 验证：`go build ./...` 通过；`go vet ./...` 通过；`go clean -testcache; go test ./... -count=1` 全部通过（16 包全绿，protocol 测试 96s 完成）；`go mod tidy` 通过

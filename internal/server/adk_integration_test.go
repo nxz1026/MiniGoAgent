@@ -57,7 +57,7 @@ func (a *testAgentAdapter) Generate(ctx context.Context, msgs []*schema.Message)
 	if len(resp.Messages) == 0 {
 		return &schema.Message{Role: schema.Assistant, Content: ""}, nil
 	}
-	return adkToEino(resp.Messages[0]), nil
+	return adkToEino(resp.Messages[len(resp.Messages)-1]), nil
 }
 
 func (a *testAgentAdapter) Stream(ctx context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
@@ -187,6 +187,12 @@ func TestIntegration_ChatEndpoint(t *testing.T) {
 			ReasoningContent: "thinking...",
 		}, nil
 	})
+	mockProto.streamFn = func(ctx context.Context, req protocol.Request) (<-chan protocol.Chunk, error) {
+		ch := make(chan protocol.Chunk, 1)
+		ch <- protocol.Chunk{Type: protocol.ChunkText, Text: "test response"}
+		close(ch)
+		return ch, nil
+	}
 
 	resp, err := http.Post(ts.URL+"/api/chat", "application/json",
 		strings.NewReader(`{"message":"hello"}`))
@@ -215,9 +221,14 @@ func TestIntegration_ChatEndpoint(t *testing.T) {
 }
 
 func TestIntegration_ChatEndpointError(t *testing.T) {
-	ts, _, _ := setupTestServer(t, func(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
+	ts, mockProto, _ := setupTestServer(t, func(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
 		return nil, io.ErrUnexpectedEOF
 	})
+	mockProto.streamFn = func(ctx context.Context, req protocol.Request) (<-chan protocol.Chunk, error) {
+		ch := make(chan protocol.Chunk, 1)
+		close(ch)
+		return ch, io.ErrUnexpectedEOF
+	}
 
 	resp, err := http.Post(ts.URL+"/api/chat", "application/json",
 		strings.NewReader(`{"message":"hello"}`))
@@ -342,6 +353,12 @@ func TestIntegration_RunnerEvents(t *testing.T) {
 		chatFn: func(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
 			return &protocol.Response{Content: "event test"}, nil
 		},
+		streamFn: func(ctx context.Context, req protocol.Request) (<-chan protocol.Chunk, error) {
+			ch := make(chan protocol.Chunk, 1)
+			ch <- protocol.Chunk{Type: protocol.ChunkText, Text: "event test"}
+			close(ch)
+			return ch, nil
+		},
 	}, "test-model")
 	reg := adktool.NewToolRegistry()
 	agent, err := adk.NewReactAgent(context.Background(), &adk.AgentConfig{
@@ -377,9 +394,15 @@ func TestIntegration_RunnerEvents(t *testing.T) {
 }
 
 func TestIntegration_ConcurrentRequests(t *testing.T) {
-	ts, _, _ := setupTestServer(t, func(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
+	ts, mockProto, _ := setupTestServer(t, func(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
 		return &protocol.Response{Content: "concurrent ok"}, nil
 	})
+	mockProto.streamFn = func(ctx context.Context, req protocol.Request) (<-chan protocol.Chunk, error) {
+		ch := make(chan protocol.Chunk, 1)
+		ch <- protocol.Chunk{Type: protocol.ChunkText, Text: "concurrent ok"}
+		close(ch)
+		return ch, nil
+	}
 
 	var wg sync.WaitGroup
 	var success atomic.Int32
@@ -409,7 +432,7 @@ func TestIntegration_SessionIsolation(t *testing.T) {
 	callCount := 0
 	var mu sync.Mutex
 
-	ts, _, _ := setupTestServer(t, func(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
+	ts, mockProto, _ := setupTestServer(t, func(ctx context.Context, req protocol.Request) (*protocol.Response, error) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -418,6 +441,15 @@ func TestIntegration_SessionIsolation(t *testing.T) {
 			ReasoningContent: "",
 		}, nil
 	})
+	mockProto.streamFn = func(ctx context.Context, req protocol.Request) (<-chan protocol.Chunk, error) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+		ch := make(chan protocol.Chunk, 1)
+		ch <- protocol.Chunk{Type: protocol.ChunkText, Text: "response"}
+		close(ch)
+		return ch, nil
+	}
 
 	sendMsg := func(sid string) {
 		req, _ := http.NewRequest("POST", ts.URL+"/api/chat",

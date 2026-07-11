@@ -121,12 +121,12 @@ func (r *ToolRegistry) Check(ctx context.Context, name string) bool {
 
 	r.mu.RLock()
 	t := r.tools[name]
-	r.mu.RUnlock()
 	if t == nil {
+		r.mu.RUnlock()
 		return false
 	}
-
 	available := t.Check(ctx)
+	r.mu.RUnlock()
 	now := time.Now()
 
 	r.checkCacheMu.Lock()
