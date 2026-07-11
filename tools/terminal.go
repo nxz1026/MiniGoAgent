@@ -80,9 +80,10 @@ func runElevated(ctx context.Context, command string) (string, error) {
 		return "", fmt.Errorf("创建临时文件失败: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
+	escapedCmd := strings.ReplaceAll(command, "'", "''")
 	psCmd := fmt.Sprintf(
 		`Start-Process cmd -Verb RunAs -ArgumentList '/c,%s > "%s" 2>&1' -Wait -WindowStyle Hidden`,
-		strings.ReplaceAll(command, `"`, `\"`),
+		escapedCmd,
 		tmpFile.Name(),
 	)
 	_, err = runCmd(ctx, "powershell", "-NoProfile", "-Command", psCmd)

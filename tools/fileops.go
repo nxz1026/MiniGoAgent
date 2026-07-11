@@ -110,7 +110,7 @@ func EditFile(ctx context.Context, input EditFileInput) (string, error) {
 		return "", fmt.Errorf("在 %s 中未找到匹配的原文", input.Path)
 	}
 	content = strings.ReplaceAll(content, input.OldText, input.NewText)
-	if err := os.WriteFile(input.Path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("写入文件失败: %w", err)
 	}
 	return fmt.Sprintf("已在 %s 中替换 %d 处", input.Path, n), nil
