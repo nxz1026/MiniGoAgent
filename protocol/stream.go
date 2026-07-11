@@ -19,12 +19,14 @@ type EventBus struct {
 	wg        sync.WaitGroup
 	stopOnce  sync.Once
 	stopped   atomic.Bool
+	runDone   chan struct{}
 }
 
 func NewEventBus(ctx context.Context, bufferSize int) *EventBus {
 	eb := &EventBus{
 		publisher: make(chan Chunk, bufferSize),
 		subs:      make(map[string]chan Chunk),
+		runDone:   make(chan struct{}),
 	}
 	eb.wg.Add(1)
 	go eb.run()
@@ -79,17 +81,21 @@ func (eb *EventBus) Stop() {
 		eb.mu.Lock()
 		eb.stopped.Store(true)
 		close(eb.publisher)
-		for name, ch := range eb.subs {
-			close(ch)
-			delete(eb.subs, name)
-		}
 		eb.mu.Unlock()
 	})
+	<-eb.runDone
+	eb.mu.Lock()
+	for name, ch := range eb.subs {
+		close(ch)
+		delete(eb.subs, name)
+	}
+	eb.mu.Unlock()
 	eb.wg.Wait()
 }
 
 func (eb *EventBus) run() {
 	defer eb.wg.Done()
+	defer close(eb.runDone)
 	for chunk := range eb.publisher {
 		eb.mu.RLock()
 		for _, ch := range eb.subs {

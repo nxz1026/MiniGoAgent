@@ -116,10 +116,7 @@ func (h *HealthChecker) recordSuccess() {
 	if h.breaker != nil {
 		h.breaker.Success()
 	}
-
-	if prevStatus != HealthHealthy {
-		h.onStatusChange(prevStatus, HealthHealthy)
-	}
+	_ = prevStatus
 }
 
 func (h *HealthChecker) recordFailure(err error) {
@@ -135,37 +132,5 @@ func (h *HealthChecker) recordFailure(err error) {
 	if h.breaker != nil {
 		h.breaker.Check(err)
 	}
-
-	if prevStatus != HealthUnhealthy || h.consecutiveFailures == 1 {
-		h.onStatusChange(prevStatus, HealthUnhealthy)
-	}
-}
-
-func (h *HealthChecker) onStatusChange(from, to HealthStatus) {
-	if h.client.Transport != nil {
-		if logf := h.logf(); logf != nil {
-			logf("health checker %s: %s -> %s (failures=%d, err=%v)",
-				h.vendor, statusName(from), statusName(to),
-				h.consecutiveFailures, h.lastErr)
-		}
-	}
-}
-
-func (h *HealthChecker) logf() func(string, ...any) {
-	return nil
-}
-
-func statusName(s HealthStatus) string {
-	switch s {
-	case HealthUnknown:
-		return "unknown"
-	case HealthHealthy:
-		return "healthy"
-	case HealthUnhealthy:
-		return "unhealthy"
-	case HealthCircuitOpen:
-		return "circuit_open"
-	default:
-		return fmt.Sprintf("status(%d)", s)
-	}
+	_ = prevStatus
 }

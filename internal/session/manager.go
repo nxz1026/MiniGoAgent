@@ -136,6 +136,7 @@ type historyMessage struct {
 	ToolCalls        []historyToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string            `json:"tool_call_id,omitempty"`
 	Name             string            `json:"name,omitempty"`
+	MultiContent     []map[string]any  `json:"multi_content,omitempty"`
 }
 
 func toHistoryMsg(m *schema.Message) historyMessage {
@@ -145,6 +146,11 @@ func toHistoryMsg(m *schema.Message) historyMessage {
 		ReasoningContent: m.ReasoningContent,
 		ToolCallID:       m.ToolCallID,
 		Name:             m.Name,
+	}
+	if len(m.UserInputMultiContent) > 0 {
+		hm.MultiContent = fromEinoMultiContent(m.UserInputMultiContent)
+	} else if len(m.MultiContent) > 0 {
+		hm.MultiContent = chatMessagePartsToMaps(m.MultiContent)
 	}
 	for _, tc := range m.ToolCalls {
 		hm.ToolCalls = append(hm.ToolCalls, historyToolCall{
@@ -162,6 +168,9 @@ func fromHistoryMsg(hm historyMessage) *schema.Message {
 		ToolCallID:       hm.ToolCallID,
 		Name:             hm.Name,
 	}
+	if len(hm.MultiContent) > 0 {
+		m.UserInputMultiContent = toEinoMultiContent(hm.MultiContent)
+	}
 	for _, tc := range hm.ToolCalls {
 		m.ToolCalls = append(m.ToolCalls, schema.ToolCall{
 			ID: tc.ID, Type: tc.Type,
@@ -169,6 +178,64 @@ func fromHistoryMsg(hm historyMessage) *schema.Message {
 		})
 	}
 	return m
+}
+
+func chatMessagePartsToMaps(parts []schema.ChatMessagePart) []map[string]any {
+	out := make([]map[string]any, 0, len(parts))
+	for _, p := range parts {
+		item := map[string]any{"type": string(p.Type)}
+		if p.Text != "" {
+			item["text"] = p.Text
+		}
+		if p.ImageURL != nil {
+			item["image_url"] = map[string]any{"url": p.ImageURL.URL}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func toEinoMultiContent(mc []map[string]any) []schema.MessageInputPart {
+	out := make([]schema.MessageInputPart, 0, len(mc))
+	for _, item := range mc {
+		typ, _ := item["type"].(string)
+		part := schema.MessageInputPart{Type: schema.ChatMessagePartType(typ)}
+		if text, ok := item["text"].(string); ok {
+			part.Text = text
+		}
+		if imgRaw, ok := item["image_url"]; ok {
+			if img, ok := imgRaw.(map[string]any); ok {
+				url, _ := img["url"].(string)
+				part.Image = &schema.MessageInputImage{
+					MessagePartCommon: schema.MessagePartCommon{URL: &url},
+				}
+			}
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func fromEinoMultiContent(mc []schema.MessageInputPart) []map[string]any {
+	out := make([]map[string]any, 0, len(mc))
+	for _, part := range mc {
+		item := map[string]any{"type": string(part.Type)}
+		if part.Text != "" {
+			item["text"] = part.Text
+		}
+		if part.Image != nil {
+			img := map[string]any{}
+			if part.Image.URL != nil {
+				img["url"] = *part.Image.URL
+			}
+			if part.Image.Base64Data != nil {
+				img["url"] = "data:" + part.Image.MIMEType + ";base64," + *part.Image.Base64Data
+			}
+			item["image_url"] = img
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func Marshal(sessions map[string][]*schema.Message) ([]byte, error) {

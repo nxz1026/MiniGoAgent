@@ -74,4 +74,8 @@ func (m *HealthManager) setCheckerStatus(vendor Vendor, status HealthStatus) {
 	}
 }
 
+func StopHealthManager() {
+	vendorHealthManager.Stop()
+}
+
 

@@ -198,6 +198,7 @@ func main() {
 				log.Warn("关闭 Usage 数据库失败: %v", err)
 			}
 		}
+		protocol.StopHealthManager()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)

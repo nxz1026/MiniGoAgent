@@ -686,30 +686,29 @@ func (o *OpenAI) readStream(ctx context.Context, resp *http.Response, out chan<-
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
-			sendChunk(ctx, out, Chunk{Type: ChunkDone})
+			state.send(Chunk{Type: ChunkDone})
 			break
 		}
 
 		stop, err := o.processSSEData(data, state)
 		if err != nil {
-			return emitted, o.streamErr(emitted, err)
+			return state.emitted, o.streamErr(state.emitted, err)
 		}
 		if stop {
-			return emitted, nil
+			return state.emitted, nil
 		}
-		emitted = state.emitted
 	}
 
 	if err := scanner.Err(); err != nil {
-		return emitted, o.streamErr(emitted, fmt.Errorf("scanner error: %w", err))
+		return state.emitted, o.streamErr(state.emitted, fmt.Errorf("scanner error: %w", err))
 	}
 	if stalled.Load() {
 		o.logf(ctx, "RAW stream idle timeout after %v", idleTimeout(o.streamTimeout))
 		sendChunk(ctx, out, Chunk{Type: ChunkError, Error: fmt.Errorf("stream idle timeout")})
-		return emitted, o.streamErr(emitted, fmt.Errorf("stream idle timeout"))
+		return state.emitted, o.streamErr(state.emitted, fmt.Errorf("stream idle timeout"))
 	}
-	o.logf(ctx, "RAW stream EOF emitted=%v", emitted)
-	return emitted, nil
+	o.logf(ctx, "RAW stream EOF emitted=%v", state.emitted)
+	return state.emitted, nil
 }
 
 type readStreamState struct {
