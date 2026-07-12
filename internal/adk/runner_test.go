@@ -131,11 +131,11 @@ func TestRunnerRunWithStore(t *testing.T) {
 	}
 
 	snap, _ := store.Snapshot(context.Background(), "sess_1")
-	if len(snap) != 1 {
-		t.Fatalf("expected 1 stored message, got %d", len(snap))
+	if len(snap) != 2 {
+		t.Fatalf("expected input and response to be stored, got %d messages", len(snap))
 	}
-	if snap[0].Content != "answer" {
-		t.Fatalf("expected stored 'answer', got %q", snap[0].Content)
+	if snap[0].Content != "q1" || snap[1].Content != "answer" {
+		t.Fatalf("unexpected stored turn: %+v", snap)
 	}
 }
 
@@ -163,8 +163,8 @@ func TestRunnerRunWithStoreAppendsToExisting(t *testing.T) {
 	}
 
 	snap, _ := store.Snapshot(context.Background(), "sess_2")
-	if len(snap) != 2 {
-		t.Fatalf("expected 2 stored messages (prior+new), got %d", len(snap))
+	if len(snap) != 3 {
+		t.Fatalf("expected prior turn plus new input and response, got %d", len(snap))
 	}
 }
 
@@ -283,6 +283,37 @@ func TestRunnerStream(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 event, got %d", count)
+	}
+}
+
+func TestRunnerStreamStoresCompletedTurn(t *testing.T) {
+	store := newMockStore()
+	r := NewRunnerWithAgent(&mockAgent{
+		streamFn: func(ctx context.Context, req *adktypes.Request) (<-chan adktypes.Event, error) {
+			ch := make(chan adktypes.Event, 2)
+			ch <- adktypes.Event{Type: adktypes.EventText, Content: "hel"}
+			ch <- adktypes.Event{Type: adktypes.EventText, Content: "lo"}
+			close(ch)
+			return ch, nil
+		},
+	}, store, nil, nil, nil)
+
+	events, err := r.Stream(context.Background(), &adktypes.Request{
+		Messages:  []*adktypes.Message{{Role: adktypes.RoleUser, Content: "hi"}},
+		SessionID: "stream-session",
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	for range events {
+	}
+
+	snap, _ := store.Snapshot(context.Background(), "stream-session")
+	if len(snap) != 2 {
+		t.Fatalf("expected input and response to be stored, got %d messages", len(snap))
+	}
+	if snap[0].Content != "hi" || snap[1].Content != "hello" {
+		t.Fatalf("unexpected stored stream turn: %+v", snap)
 	}
 }
 

@@ -197,10 +197,11 @@ func TestBridgeStreamReasoning(t *testing.T) {
 }
 
 func TestBridgeStreamError(t *testing.T) {
+	streamErr := errors.New("stream failed")
 	b := NewBridge(&mockProtocol{
 		streamFn: func(ctx context.Context, req protocol.Request) (<-chan protocol.Chunk, error) {
 			ch := make(chan protocol.Chunk, 1)
-			ch <- protocol.Chunk{Type: protocol.ChunkError, Error: errors.New("stream failed")}
+			ch <- protocol.Chunk{Type: protocol.ChunkError, Error: streamErr}
 			close(ch)
 			return ch, nil
 		},
@@ -214,8 +215,38 @@ func TestBridgeStreamError(t *testing.T) {
 	}
 
 	msg, err := sr.Recv()
-	if msg != nil {
-		t.Fatalf("expected nil message on error, got %+v", msg)
+	if msg != nil || !errors.Is(err, streamErr) {
+		t.Fatalf("expected stream error, got message=%+v error=%v", msg, err)
+	}
+}
+
+func TestBridgeStreamDoneEmitsFinalMessageOnce(t *testing.T) {
+	b := NewBridge(&mockProtocol{
+		streamFn: func(ctx context.Context, req protocol.Request) (<-chan protocol.Chunk, error) {
+			ch := make(chan protocol.Chunk, 2)
+			ch <- protocol.Chunk{Type: protocol.ChunkText, Text: "done"}
+			ch <- protocol.Chunk{Type: protocol.ChunkDone}
+			close(ch)
+			return ch, nil
+		},
+	}, "gpt-4")
+
+	sr, err := b.Stream(context.Background(), []*schema.Message{{Role: schema.User, Content: "hi"}})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	defer sr.Close()
+
+	var messages []*schema.Message
+	for {
+		msg, err := sr.Recv()
+		if err != nil {
+			break
+		}
+		messages = append(messages, msg)
+	}
+	if len(messages) != 1 || messages[0].Content != "done" {
+		t.Fatalf("expected one final message, got %+v", messages)
 	}
 }
 

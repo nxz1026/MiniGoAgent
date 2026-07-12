@@ -82,9 +82,9 @@ func (b *Bridge) stream(ctx context.Context, input []*schema.Message, opts ...mo
 	go func() {
 		defer sw.Close()
 		var (
-			fullContent      string
-			fullReasoning    string
-			toolCalls        []schema.ToolCall
+			fullContent       string
+			fullReasoning     string
+			toolCalls         []schema.ToolCall
 			streamInterrupted bool
 		)
 		for {
@@ -110,12 +110,15 @@ func (b *Bridge) stream(ctx context.Context, input []*schema.Message, opts ...mo
 				case protocol.ChunkToolCallStart:
 					if chunk.ToolCall != nil {
 						toolCalls = append(toolCalls, schema.ToolCall{
-							ID:   chunk.ToolCall.ID,
-							Type: "function",
+							ID:       chunk.ToolCall.ID,
+							Type:     "function",
 							Function: schema.FunctionCall{Name: chunk.ToolCall.Name},
 						})
 					}
 				case protocol.ChunkToolCall:
+					if chunk.ToolCall == nil {
+						continue
+					}
 					for i := range toolCalls {
 						if toolCalls[i].ID == chunk.ToolCall.ID {
 							toolCalls[i].Function.Arguments = chunk.ToolCall.Arguments
@@ -130,6 +133,7 @@ func (b *Bridge) stream(ctx context.Context, input []*schema.Message, opts ...mo
 					if sw.Send(msg, nil) {
 						return
 					}
+					return
 				case protocol.ChunkError:
 					var interrupted *protocol.StreamInterruptedError
 					if chunk.Error != nil && errors.As(chunk.Error, &interrupted) {
@@ -140,6 +144,12 @@ func (b *Bridge) stream(ctx context.Context, input []*schema.Message, opts ...mo
 							return
 						}
 						sw.Send(fromProtoResp(resp), nil)
+						return
+					}
+					if chunk.Error != nil {
+						sw.Send(nil, chunk.Error)
+					} else {
+						sw.Send(nil, errors.New("stream failed without an error"))
 					}
 					return
 				}

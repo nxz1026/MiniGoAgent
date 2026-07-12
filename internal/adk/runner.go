@@ -93,6 +93,7 @@ func (r *Runner) Run(ctx context.Context, req *adktypes.Request) (*adktypes.Resp
 		r.publishEvent(ctx, event.Error, &event.ErrorData{Error: err})
 		return nil, err
 	}
+	inputMessages := append([]*adktypes.Message(nil), req.Messages...)
 	req = prepared
 
 	r.publishEvent(ctx, event.AgentStart, &event.AgentStartData{
@@ -137,8 +138,9 @@ func (r *Runner) Run(ctx context.Context, req *adktypes.Request) (*adktypes.Resp
 		resp = &adktypes.Response{}
 	}
 
-	if r.store != nil && req.SessionID != "" {
-		_ = r.store.Append(ctx, req.SessionID, resp.Messages...)
+	if err := r.appendConversation(ctx, req.SessionID, inputMessages, resp.Messages); err != nil {
+		r.publishEvent(ctx, event.Error, &event.ErrorData{Error: err})
+		return nil, err
 	}
 
 	r.publishEvent(ctx, event.AgentEnd, &event.AgentEndData{
@@ -154,6 +156,7 @@ func (r *Runner) Stream(ctx context.Context, req *adktypes.Request) (<-chan adkt
 		r.publishEvent(ctx, event.Error, &event.ErrorData{Error: err})
 		return nil, err
 	}
+	inputMessages := append([]*adktypes.Message(nil), req.Messages...)
 	req = prepared
 
 	r.publishEvent(ctx, event.AgentStart, &event.AgentStartData{
@@ -192,12 +195,37 @@ func (r *Runner) Stream(ctx context.Context, req *adktypes.Request) (<-chan adkt
 		defer r.publishEvent(ctx, event.AgentEnd, &event.AgentEndData{
 			SessionID: req.SessionID,
 		})
+		var content, reasoning string
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case evt, ok := <-rawEvents:
 				if !ok {
+					if err := r.appendConversation(ctx, req.SessionID, inputMessages, []*adktypes.Message{{
+						Role:             adktypes.RoleAssistant,
+						Content:          content,
+						ReasoningContent: reasoning,
+					}}); err != nil {
+						r.publishEvent(ctx, event.Error, &event.ErrorData{Error: err})
+						select {
+						case events <- adktypes.Event{Type: adktypes.EventError, Content: err.Error(), Error: err}:
+						case <-ctx.Done():
+						}
+					}
+					return
+				}
+				if evt.Type == adktypes.EventText {
+					content += evt.Content
+				}
+				if evt.Type == adktypes.EventReasoning {
+					reasoning += evt.Content
+				}
+				if evt.Type == adktypes.EventError {
+					select {
+					case events <- evt:
+					case <-ctx.Done():
+					}
 					return
 				}
 				select {
@@ -210,6 +238,21 @@ func (r *Runner) Stream(ctx context.Context, req *adktypes.Request) (<-chan adkt
 	}()
 
 	return events, nil
+}
+
+// appendConversation records a completed turn. Input messages are kept with the
+// response so a later request can reconstruct the full conversation.
+func (r *Runner) appendConversation(ctx context.Context, sessionID string, input, output []*adktypes.Message) error {
+	if r.store == nil || sessionID == "" {
+		return nil
+	}
+	messages := make([]*adktypes.Message, 0, len(input)+len(output))
+	messages = append(messages, input...)
+	messages = append(messages, output...)
+	if err := r.store.Append(ctx, sessionID, messages...); err != nil {
+		return fmt.Errorf("append session %q: %w", sessionID, err)
+	}
+	return nil
 }
 
 // prepareRequest validates the input and builds a working copy so the runner
