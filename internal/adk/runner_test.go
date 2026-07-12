@@ -304,6 +304,37 @@ func TestRunnerRunNilResponse(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectsNilRequest(t *testing.T) {
+	r := NewRunnerWithAgent(&mockAgent{}, nil, nil, nil, nil)
+	if _, err := r.Run(context.Background(), nil); err == nil || err.Error() != "agent request is nil" {
+		t.Fatalf("expected nil request error, got %v", err)
+	}
+	if _, err := r.Stream(context.Background(), nil); err == nil || err.Error() != "agent request is nil" {
+		t.Fatalf("expected nil request error, got %v", err)
+	}
+}
+
+func TestRunnerDoesNotMutateRequestWhenLoadingSession(t *testing.T) {
+	store := newMockStore()
+	_ = store.Append(context.Background(), "session", &adktypes.Message{Role: adktypes.RoleUser, Content: "history"})
+	req := &adktypes.Request{SessionID: "session", Messages: []*adktypes.Message{{Role: adktypes.RoleUser, Content: "new"}}}
+	r := NewRunnerWithAgent(&mockAgent{
+		runFn: func(ctx context.Context, received *adktypes.Request) (*adktypes.Response, error) {
+			if len(received.Messages) != 2 {
+				t.Fatalf("expected history plus request, got %d messages", len(received.Messages))
+			}
+			return &adktypes.Response{}, nil
+		},
+	}, store, nil, nil, nil)
+
+	if _, err := r.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Content != "new" {
+		t.Fatalf("request was mutated: %+v", req.Messages)
+	}
+}
+
 func TestRunnerStreamContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 

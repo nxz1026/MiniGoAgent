@@ -42,6 +42,9 @@ func NewRunner(cfg *RunnerConfig) (*Runner, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("runner config is nil")
 	}
+	if cfg.AgentConfig == nil {
+		return nil, fmt.Errorf("runner agent config is nil")
+	}
 	var prompt string
 	if cfg.Prompt != nil {
 		prompt = cfg.Prompt.SystemPrompt()
@@ -85,35 +88,19 @@ func NewRunnerWithAgent(agent Agent, store session.Store, guards *tool.Guardrail
 }
 
 func (r *Runner) Run(ctx context.Context, req *adktypes.Request) (*adktypes.Response, error) {
-	if r.guards != nil {
-		for _, msg := range req.Messages {
-			for _, tc := range msg.ToolCalls {
-				result := r.guards.Check(ctx, tc.Name, tc.Arguments)
-				if !result.Allowed {
-					r.publishEvent(ctx, event.Error, &event.ErrorData{Error: fmt.Errorf("tool %s blocked by guardrails: %s", tc.Name, result.Reason)})
-					return nil, fmt.Errorf("tool %s blocked by guardrails: %s", tc.Name, result.Reason)
-				}
-			}
-		}
+	prepared, err := r.prepareRequest(ctx, req)
+	if err != nil {
+		r.publishEvent(ctx, event.Error, &event.ErrorData{Error: err})
+		return nil, err
 	}
-
-	if r.store != nil && req.SessionID != "" {
-		existing, _ := r.store.Get(ctx, req.SessionID)
-		messages := make([]*adktypes.Message, 0, len(existing)+len(req.Messages))
-		messages = append(messages, existing...)
-		messages = append(messages, req.Messages...)
-		req.Messages = messages
-	}
+	req = prepared
 
 	r.publishEvent(ctx, event.AgentStart, &event.AgentStartData{
 		SessionID: req.SessionID,
 		ToolNames: req.ToolNames,
 	})
 
-	var (
-		resp *adktypes.Response
-		err  error
-	)
+	var resp *adktypes.Response
 
 	if r.mw != nil {
 		mwReq := &middleware.ModelRequest{
@@ -162,27 +149,12 @@ func (r *Runner) Run(ctx context.Context, req *adktypes.Request) (*adktypes.Resp
 }
 
 func (r *Runner) Stream(ctx context.Context, req *adktypes.Request) (<-chan adktypes.Event, error) {
-	if r.guards != nil {
-		for _, msg := range req.Messages {
-			for _, tc := range msg.ToolCalls {
-				result := r.guards.Check(ctx, tc.Name, tc.Arguments)
-				if !result.Allowed {
-					errCh := make(chan adktypes.Event, 1)
-					errCh <- adktypes.Event{Type: adktypes.EventError, Error: fmt.Errorf("tool %s blocked by guardrails: %s", tc.Name, result.Reason)}
-					close(errCh)
-					return errCh, nil
-				}
-			}
-		}
+	prepared, err := r.prepareRequest(ctx, req)
+	if err != nil {
+		r.publishEvent(ctx, event.Error, &event.ErrorData{Error: err})
+		return nil, err
 	}
-
-	if r.store != nil && req.SessionID != "" {
-		existing, _ := r.store.Get(ctx, req.SessionID)
-		messages := make([]*adktypes.Message, 0, len(existing)+len(req.Messages))
-		messages = append(messages, existing...)
-		messages = append(messages, req.Messages...)
-		req.Messages = messages
-	}
+	req = prepared
 
 	r.publishEvent(ctx, event.AgentStart, &event.AgentStartData{
 		SessionID: req.SessionID,
@@ -238,6 +210,42 @@ func (r *Runner) Stream(ctx context.Context, req *adktypes.Request) (<-chan adkt
 	}()
 
 	return events, nil
+}
+
+// prepareRequest validates the input and builds a working copy so the runner
+// can add session history without changing the caller's request.
+func (r *Runner) prepareRequest(ctx context.Context, req *adktypes.Request) (*adktypes.Request, error) {
+	if req == nil {
+		return nil, fmt.Errorf("agent request is nil")
+	}
+	prepared := *req
+	prepared.Messages = append([]*adktypes.Message(nil), req.Messages...)
+	prepared.ToolNames = append([]string(nil), req.ToolNames...)
+
+	if r.guards != nil {
+		for _, msg := range prepared.Messages {
+			if msg == nil {
+				continue
+			}
+			for _, tc := range msg.ToolCalls {
+				result := r.guards.Check(ctx, tc.Name, tc.Arguments)
+				if !result.Allowed {
+					return nil, fmt.Errorf("tool %s blocked by guardrails: %s", tc.Name, result.Reason)
+				}
+			}
+		}
+	}
+
+	if r.store != nil && prepared.SessionID != "" {
+		existing, err := r.store.Get(ctx, prepared.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("load session %q: %w", prepared.SessionID, err)
+		}
+		messages := make([]*adktypes.Message, 0, len(existing)+len(prepared.Messages))
+		messages = append(messages, existing...)
+		prepared.Messages = append(messages, prepared.Messages...)
+	}
+	return &prepared, nil
 }
 
 func (r *Runner) Agent() Agent {

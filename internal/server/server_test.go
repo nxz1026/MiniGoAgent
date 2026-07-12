@@ -31,11 +31,7 @@ func TestForwardChat(t *testing.T) {
 }
 
 func TestExtractLocalImagePath(t *testing.T) {
-	tmp, err := os.MkdirTemp("E:\\", "minigoagent-test-*")
-	if err != nil {
-		t.Fatalf("temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmp)
+	tmp := t.TempDir()
 	imgPath := filepath.Join(tmp, "test.png")
 	os.WriteFile(imgPath, []byte("fake"), 0644)
 

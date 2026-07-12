@@ -100,6 +100,9 @@ type ReactAgent struct {
 }
 
 func NewReactAgent(ctx context.Context, cfg *AgentConfig) (*ReactAgent, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("agent config is nil")
+	}
 	if cfg.Bridge == nil {
 		return nil, fmt.Errorf("bridge is required for ReactAgent")
 	}
@@ -188,6 +191,9 @@ func (a *ReactAgent) Stream(ctx context.Context, req *adktypes.Request) (<-chan 
 			default:
 			}
 			msg, err := sr.Recv()
+			if err == io.EOF {
+				return
+			}
 			if err != nil {
 				select {
 				case events <- adktypes.Event{Type: adktypes.EventError, Content: err.Error()}:

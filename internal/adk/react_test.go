@@ -39,6 +39,20 @@ func TestNewReactAgentNilBridge(t *testing.T) {
 	}
 }
 
+func TestNewReactAgentNilConfig(t *testing.T) {
+	_, err := NewReactAgent(context.Background(), nil)
+	if err == nil || err.Error() != "agent config is nil" {
+		t.Fatalf("expected nil config error, got %v", err)
+	}
+}
+
+func TestNewRunnerNilAgentConfig(t *testing.T) {
+	_, err := NewRunner(&RunnerConfig{})
+	if err == nil || err.Error() != "runner agent config is nil" {
+		t.Fatalf("expected nil agent config error, got %v", err)
+	}
+}
+
 func TestNewReactAgentEmptyToolNames(t *testing.T) {
 	reg := tool.NewToolRegistry()
 	_, err := NewReactAgent(context.Background(), &AgentConfig{
